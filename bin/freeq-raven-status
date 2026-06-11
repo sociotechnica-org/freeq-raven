@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ENV_FILE="${RAVEN_ENV_FILE:-$ROOT/.env}"
+if [[ -f "$ENV_FILE" ]]; then
+  set -a
+  # shellcheck disable=SC1090
+  source "$ENV_FILE"
+  set +a
+fi
+
+PID_FILE="$ROOT/.runtime/freeq-raven.pid"
+TMUX_SESSION="${RAVEN_TMUX_SESSION:-freeq-raven}"
+if command -v tmux >/dev/null 2>&1 && tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
+  echo "process: running tmux session $TMUX_SESSION"
+elif [[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
+  echo "process: running pid $(cat "$PID_FILE")"
+else
+  echo "process: stopped"
+fi
+
+channel="${FREEQ_CHANNEL:-#alexandria}"
+encoded="${channel//#/%23}"
+if command -v curl >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+  curl -sS "https://irc.freeq.at/api/v1/channels/$encoded/sessions" \
+    | jq '.active | if . == null then null else {id, state, participant_count, participants: [.participants[]? | {nick, instance_id, role}]} end'
+fi

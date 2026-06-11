@@ -1,0 +1,7 @@
+.deps/
+.env
+.runtime/
+target/
+*.log
+*.pid
+.DS_Store

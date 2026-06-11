@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+LOG_FILE="$ROOT/.runtime/freeq-raven.log"
+mkdir -p "$(dirname "$LOG_FILE")"
+touch "$LOG_FILE"
+exec tail -f "$LOG_FILE"

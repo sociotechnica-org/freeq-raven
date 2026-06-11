@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ENV_FILE="${RAVEN_ENV_FILE:-$ROOT/.env}"
+
+if [[ ! -f "$ENV_FILE" ]]; then
+  echo "Missing $ENV_FILE. Copy .env.example to .env and fill required keys." >&2
+  exit 2
+fi
+
+set -a
+# shellcheck disable=SC1090
+source "$ENV_FILE"
+set +a
+
+: "${ELEVENLABS_API_KEY:?ELEVENLABS_API_KEY is required}"
+: "${DEEPGRAM_API_KEY:?DEEPGRAM_API_KEY is required}"
+: "${INCEPTION_API_KEY:?INCEPTION_API_KEY is required}"
+
+export FREEQ_SERVER="${FREEQ_SERVER:-wss://irc.freeq.at/irc}"
+export FREEQ_CHANNEL="${FREEQ_CHANNEL:-#alexandria}"
+export RAVEN_FREEQ_NICK="${RAVEN_FREEQ_NICK:-Raven}"
+export RAVEN_IDENTITY_NAME="${RAVEN_IDENTITY_NAME:-raven-eliza}"
+export DEEPGRAM_MODEL="${DEEPGRAM_MODEL:-nova-3}"
+export INCEPTION_REASONING_EFFORT="${INCEPTION_REASONING_EFFORT:-instant}"
+export RAVEN_RENDER_BACKEND="${RAVEN_RENDER_BACKEND:-svg}"
+export RAVEN_TOOL_WORKDIR="${RAVEN_TOOL_WORKDIR:-$ROOT}"
+export RAVEN_TOOL_COMMAND="${RAVEN_TOOL_COMMAND:-$ROOT/bin/raven-tool-runner}"
+export RUST_LOG="${RAVEN_RUST_LOG:-freeq_eliza=info,freeq_sdk=info,freeq_av=info,moq_native=warn}"
+
+FREEQ_ROOT="${FREEQ_ROOT:-$ROOT/.deps/freeq}"
+FREEQ_ELIZA_BIN="${FREEQ_ELIZA_BIN:-$FREEQ_ROOT/target/release/freeq-eliza}"
+if [[ ! -x "$FREEQ_ELIZA_BIN" ]]; then
+  "$ROOT/bin/freeq-raven-bootstrap"
+fi
+
+args=(
+  --server "$FREEQ_SERVER"
+  --channel "$FREEQ_CHANNEL"
+  --name "$RAVEN_IDENTITY_NAME"
+  --nick "$RAVEN_FREEQ_NICK"
+  --render-backend "$RAVEN_RENDER_BACKEND"
+  --ghostly-character raven
+  --deepgram-model "$DEEPGRAM_MODEL"
+  --answer-provider inception
+  --answer-model mercury-2
+  --inception-reasoning-effort "$INCEPTION_REASONING_EFFORT"
+  --elevenlabs-model "${ELEVENLABS_MODEL:-eleven_turbo_v2_5}"
+)
+
+if [[ "${RAVEN_AUTO_START_SESSION:-0}" == "1" ]]; then
+  args+=(--start-session-in "$FREEQ_CHANNEL")
+fi
+if [[ "${RAVEN_NO_PROACTIVE:-0}" == "1" ]]; then
+  args+=(--no-proactive)
+fi
+if [[ "${RAVEN_NO_AMBIENT:-0}" == "1" ]]; then
+  args+=(--no-ambient)
+fi
+
+cd "$ROOT"
+exec "$FREEQ_ELIZA_BIN" "${args[@]}"

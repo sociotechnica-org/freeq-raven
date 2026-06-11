@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  echo "usage: freeq-raven-store-key ELEVENLABS_API_KEY|DEEPGRAM_API_KEY|GROQ_API_KEY|INCEPTION_API_KEY" >&2
+  exit 2
+}
+
+[[ $# -eq 1 ]] || usage
+
+case "$1" in
+  ELEVENLABS_API_KEY | DEEPGRAM_API_KEY | GROQ_API_KEY | INCEPTION_API_KEY) key_name="$1" ;;
+  *) usage ;;
+esac
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+env_file="${RAVEN_ENV_FILE:-$ROOT/.env}"
+tmp_file="${env_file}.tmp"
+
+if command -v pbpaste >/dev/null 2>&1; then
+  value="$(pbpaste | tr -d '\r\n')"
+else
+  echo "Paste $key_name, then press Enter:" >&2
+  IFS= read -r value
+fi
+
+if [[ ${#value} -lt 20 ]]; then
+  echo "Input does not look like an API key." >&2
+  exit 2
+fi
+
+touch "$env_file"
+chmod 600 "$env_file"
+
+awk -F= -v key="$key_name" '$1 != key { print }' "$env_file" >"$tmp_file"
+printf '%s=%q\n' "$key_name" "$value" >>"$tmp_file"
+chmod 600 "$tmp_file"
+mv "$tmp_file" "$env_file"
+
+echo "$key_name stored in $env_file"
