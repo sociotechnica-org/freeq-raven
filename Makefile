@@ -1,7 +1,9 @@
-.PHONY: bootstrap start stop restart status logs check
+.PHONY: bootstrap build start stop restart status logs check test
 
 bootstrap:
 	./bin/freeq-raven-bootstrap
+
+build: bootstrap
 
 start:
 	./bin/freeq-raven-start
@@ -19,3 +21,7 @@ logs:
 
 check:
 	./bin/freeq-raven-bootstrap --check
+
+test:
+	cargo test -p freeq-raven --lib
+	cargo test -p freeq-raven identity --test identity_test
