@@ -2,6 +2,7 @@
 .env
 .runtime/
 target/
+*.secret
 *.log
 *.pid
 .DS_Store

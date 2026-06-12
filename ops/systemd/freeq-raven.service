@@ -1,0 +1,17 @@
+[Unit]
+Description=Freeq Raven agent
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/freeq-raven
+Environment=RAVEN_ENV_FILE=/opt/freeq-raven/.env
+ExecStart=/opt/freeq-raven/bin/freeq-raven
+Restart=always
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=20
+
+[Install]
+WantedBy=default.target

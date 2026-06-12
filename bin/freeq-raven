@@ -21,17 +21,18 @@ set +a
 export FREEQ_SERVER="${FREEQ_SERVER:-wss://irc.freeq.at/irc}"
 export FREEQ_CHANNEL="${FREEQ_CHANNEL:-#alexandria}"
 export RAVEN_FREEQ_NICK="${RAVEN_FREEQ_NICK:-Raven}"
-export RAVEN_IDENTITY_NAME="${RAVEN_IDENTITY_NAME:-raven-eliza}"
+export RAVEN_IDENTITY_NAME="${RAVEN_IDENTITY_NAME:-raven}"
 export DEEPGRAM_MODEL="${DEEPGRAM_MODEL:-nova-3}"
+export RAVEN_ANSWER_PROVIDER="${RAVEN_ANSWER_PROVIDER:-inception}"
+export RAVEN_ANSWER_MODEL="${RAVEN_ANSWER_MODEL:-mercury-2}"
 export INCEPTION_REASONING_EFFORT="${INCEPTION_REASONING_EFFORT:-instant}"
 export RAVEN_RENDER_BACKEND="${RAVEN_RENDER_BACKEND:-svg}"
 export RAVEN_TOOL_WORKDIR="${RAVEN_TOOL_WORKDIR:-$ROOT}"
 export RAVEN_TOOL_COMMAND="${RAVEN_TOOL_COMMAND:-$ROOT/bin/raven-tool-runner}"
-export RUST_LOG="${RAVEN_RUST_LOG:-freeq_eliza=info,freeq_sdk=info,freeq_av=info,moq_native=warn}"
+export RUST_LOG="${RAVEN_RUST_LOG:-freeq_raven=info,freeq_sdk=info,freeq_av=info,moq_native=warn}"
 
-FREEQ_ROOT="${FREEQ_ROOT:-$ROOT/.deps/freeq}"
-FREEQ_ELIZA_BIN="${FREEQ_ELIZA_BIN:-$FREEQ_ROOT/target/release/freeq-eliza}"
-if [[ ! -x "$FREEQ_ELIZA_BIN" ]]; then
+RAVEN_BIN="${RAVEN_BIN:-$ROOT/target/release/freeq-raven}"
+if [[ ! -x "$RAVEN_BIN" ]]; then
   "$ROOT/bin/freeq-raven-bootstrap"
 fi
 
@@ -43,8 +44,8 @@ args=(
   --render-backend "$RAVEN_RENDER_BACKEND"
   --ghostly-character raven
   --deepgram-model "$DEEPGRAM_MODEL"
-  --answer-provider inception
-  --answer-model mercury-2
+  --answer-provider "$RAVEN_ANSWER_PROVIDER"
+  --answer-model "$RAVEN_ANSWER_MODEL"
   --inception-reasoning-effort "$INCEPTION_REASONING_EFFORT"
   --elevenlabs-model "${ELEVENLABS_MODEL:-eleven_turbo_v2_5}"
 )
@@ -58,6 +59,12 @@ fi
 if [[ "${RAVEN_NO_AMBIENT:-0}" == "1" ]]; then
   args+=(--no-ambient)
 fi
+if [[ -n "${RAVEN_SFU_URL:-}" ]]; then
+  args+=(--sfu-url "$RAVEN_SFU_URL")
+fi
+if [[ -n "${RAVEN_PEER_AGENTS:-}" ]]; then
+  args+=(--peer-agents "$RAVEN_PEER_AGENTS")
+fi
 
 cd "$ROOT"
-exec "$FREEQ_ELIZA_BIN" "${args[@]}"
+exec "$RAVEN_BIN" "${args[@]}"

@@ -1,0 +1,65 @@
+[workspace]
+resolver = "2"
+members = ["crates/freeq-raven"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+anyhow = "1"
+thiserror = "2"
+base64 = "0.22"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rand = "0.8"
+chrono = { version = "0.4", features = ["serde"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls"] }
+k256 = { version = "0.13", features = ["ecdsa", "ecdh"] }
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+bs58 = "0.5"
+signature = "2"
+clap = { version = "4", features = ["derive", "env"] }
+tokio-rustls = "0.26"
+rustls-pemfile = "2"
+webpki-roots = "1"
+p256 = { version = "0.13", features = ["ecdsa"] }
+sha2 = "0.10"
+percent-encoding = "2"
+open = "5"
+dirs = "6"
+rusqlite = { version = "0.38", features = ["bundled"] }
+axum = { version = "0.8", features = ["ws", "multipart"] }
+tower-http = { version = "0.6", features = ["cors", "fs"] }
+aes-gcm = "0.10"
+hkdf = "0.12"
+hmac = "0.12"
+iroh = "0.97"
+iroh-quinn = "0.16"
+automerge = "0.5"
+
+# chad/freeq currently pins unreleased media-stack dependencies. Cargo
+# only honors patches from the root workspace, so freeq-raven repeats
+# Freeq's patch set here while it depends on Freeq crates by git.
+[patch.crates-io]
+noq = { git = "https://github.com/n0-computer/noq", branch = "main" }
+noq-proto = { git = "https://github.com/n0-computer/noq", branch = "main" }
+noq-udp = { git = "https://github.com/n0-computer/noq", branch = "main" }
+iroh = { git = "https://github.com/n0-computer/iroh", rev = "8af8370b" }
+iroh-base = { git = "https://github.com/n0-computer/iroh", rev = "8af8370b" }
+iroh-relay = { git = "https://github.com/n0-computer/iroh", rev = "8af8370b" }
+iroh-gossip = { git = "https://github.com/n0-computer/iroh-gossip", rev = "1038f721" }
+web-transport-iroh = { git = "https://github.com/Frando/web-transport", rev = "f7a523f1" }
+web-transport-noq = { git = "https://github.com/Frando/web-transport", rev = "f7a523f1" }
+web-transport-proto = { git = "https://github.com/Frando/web-transport", rev = "f7a523f1" }
+web-transport-trait = { git = "https://github.com/Frando/web-transport", rev = "f7a523f1" }
+
+[workspace.lints.clippy]
+too_many_arguments = "allow"
+large_enum_variant = "allow"
+await_holding_lock = "allow"

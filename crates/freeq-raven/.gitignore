@@ -1,0 +1,3 @@
+# Local whisper model files — downloaded on demand, used by the
+# optional `stt` cargo feature. Large binaries; never commit.
+models/

@@ -2,18 +2,6 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-ENV_FILE="${RAVEN_ENV_FILE:-$ROOT/.env}"
-if [[ -f "$ENV_FILE" ]]; then
-  set -a
-  # shellcheck disable=SC1090
-  source "$ENV_FILE"
-  set +a
-fi
-
-FREEQ_REPO="${FREEQ_REPO:-https://github.com/chad/freeq.git}"
-FREEQ_BASE_COMMIT="${FREEQ_BASE_COMMIT:-31aaf9f55b0b46e40c6c939b8e39d331a6456236}"
-FREEQ_ROOT="${FREEQ_ROOT:-$ROOT/.deps/freeq}"
-PATCH_FILE="$ROOT/patches/freeq-raven-eliza.patch"
 CHECK_ONLY=0
 if [[ "${1:-}" == "--check" ]]; then
   CHECK_ONLY=1
@@ -24,26 +12,14 @@ if ! command -v cargo >/dev/null 2>&1; then
   exit 2
 fi
 
-mkdir -p "$(dirname "$FREEQ_ROOT")"
-if [[ ! -d "$FREEQ_ROOT/.git" ]]; then
-  git clone "$FREEQ_REPO" "$FREEQ_ROOT"
-fi
-
-git -C "$FREEQ_ROOT" fetch origin
-git -C "$FREEQ_ROOT" reset --hard "$FREEQ_BASE_COMMIT"
-git -C "$FREEQ_ROOT" clean -fdx
-
-if ! git -C "$FREEQ_ROOT" apply --check "$PATCH_FILE"; then
-  echo "Raven Freeq patch does not apply cleanly." >&2
-  exit 1
-fi
-git -C "$FREEQ_ROOT" apply "$PATCH_FILE"
+cd "$ROOT"
 
 if [[ "$CHECK_ONLY" == "1" ]]; then
-  cargo build --manifest-path "$FREEQ_ROOT/Cargo.toml" -p freeq-eliza --release
-  cargo test --manifest-path "$FREEQ_ROOT/Cargo.toml" -p freeq-eliza tool_work_matcher_uses_word_boundaries --release
+  cargo check -p freeq-raven
+  cargo test -p freeq-raven --lib
+  cargo test -p freeq-raven identity --test identity_test
   exit 0
 fi
 
-cargo build --manifest-path "$FREEQ_ROOT/Cargo.toml" -p freeq-eliza --release
-echo "Built $FREEQ_ROOT/target/release/freeq-eliza"
+cargo build --release -p freeq-raven
+echo "Built $ROOT/target/release/freeq-raven"
