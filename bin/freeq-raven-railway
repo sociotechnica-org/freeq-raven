@@ -34,6 +34,21 @@ if [[ ! -d "$ALEXANDRIA_PROJECT_DIR/.git" ]]; then
 fi
 
 cd "$ALEXANDRIA_PROJECT_DIR"
+
+if [[ "${ALEXANDRIA_CLEAN_GENERATED:-1}" = "1" ]]; then
+  if git ls-files --error-unmatch .alexandria-next/alexandria-config.json >/dev/null 2>&1; then
+    git restore .alexandria-next/alexandria-config.json
+  else
+    rm -f .alexandria-next/alexandria-config.json
+  fi
+
+  rm -rf \
+    .alexandria-next/bin \
+    .alexandria-next/demo-workspace \
+    .alexandria-next/sources.jsonl \
+    .claude/plugins/alexandria-next
+fi
+
 "${git_cmd[@]}" fetch origin "$ALEXANDRIA_PROJECT_BRANCH"
 "${git_cmd[@]}" checkout "$ALEXANDRIA_PROJECT_BRANCH"
 
@@ -44,19 +59,18 @@ else
   git status --short --branch >&2
 fi
 
+install_args=(--yes --acp-provider "$ALEXANDRIA_NEXT_ACP_PROVIDER")
+if [[ -z "${ALEXANDRIA_NEXT_WORKSPACE:-}" ]]; then
+  install_args+=(--init)
+fi
+
 curl -fsSL https://getalexandria.ai/install-next.sh \
-  | bash -s -- --yes --init --acp-provider "$ALEXANDRIA_NEXT_ACP_PROVIDER"
+  | bash -s -- "${install_args[@]}"
 
 if [[ -n "${ALEXANDRIA_NEXT_WORKSPACE:-}" ]]; then
-  node - "$ALEXANDRIA_NEXT_WORKSPACE" <<'NODE'
-const fs = require("fs");
-
-const workspace = process.argv[2];
-const configPath = ".alexandria-next/alexandria-config.json";
-const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
-config.workspace = workspace;
-fs.writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`);
-NODE
+  "$AX2_BIN" init all \
+    --workspace "$ALEXANDRIA_NEXT_WORKSPACE" \
+    --acp-provider "$ALEXANDRIA_NEXT_ACP_PROVIDER"
 
   mkdir -p \
     "$ALEXANDRIA_NEXT_WORKSPACE/inbox" \
@@ -90,4 +104,16 @@ cd "$ROOT"
 "$ROOT/bin/freeq-raven" &
 raven_pid=$!
 
-wait -n "$ax2_pid" "$raven_pid"
+while true; do
+  if ! kill -0 "$ax2_pid" 2>/dev/null; then
+    wait "$ax2_pid"
+    exit $?
+  fi
+
+  if ! kill -0 "$raven_pid" 2>/dev/null; then
+    wait "$raven_pid"
+    exit $?
+  fi
+
+  sleep 1
+done
