@@ -3,6 +3,6 @@
   "provider": "rust",
   "buildAptPackages": ["pkg-config", "libasound2-dev"],
   "deploy": {
-    "aptPackages": ["ca-certificates", "curl", "git", "libasound2"]
+    "aptPackages": ["ca-certificates", "curl", "git", "libasound2", "nodejs", "npm"]
   }
 }
