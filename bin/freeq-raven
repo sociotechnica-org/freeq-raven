@@ -14,10 +14,6 @@ set -a
 source "$ENV_FILE"
 set +a
 
-: "${ELEVENLABS_API_KEY:?ELEVENLABS_API_KEY is required}"
-: "${DEEPGRAM_API_KEY:?DEEPGRAM_API_KEY is required}"
-: "${INCEPTION_API_KEY:?INCEPTION_API_KEY is required}"
-
 export FREEQ_SERVER="${FREEQ_SERVER:-wss://irc.freeq.at/irc}"
 export FREEQ_CHANNEL="${FREEQ_CHANNEL:-#alexandria}"
 export RAVEN_FREEQ_NICK="${RAVEN_FREEQ_NICK:-Raven}"
@@ -30,6 +26,20 @@ export RAVEN_RENDER_BACKEND="${RAVEN_RENDER_BACKEND:-svg}"
 export RAVEN_TOOL_WORKDIR="${RAVEN_TOOL_WORKDIR:-$ROOT}"
 export RAVEN_TOOL_COMMAND="${RAVEN_TOOL_COMMAND:-$ROOT/bin/raven-tool-runner}"
 export RUST_LOG="${RAVEN_RUST_LOG:-freeq_raven=info,freeq_sdk=info,freeq_av=info,moq_native=warn}"
+
+answer_provider="${RAVEN_ANSWER_PROVIDER,,}"
+answer_model="${RAVEN_ANSWER_MODEL,,}"
+case "$answer_provider:$answer_model" in
+  anthropic:* | claude:* | auto:claude-* | :claude-*)
+    : "${ANTHROPIC_API_KEY:?ANTHROPIC_API_KEY is required for the selected Raven answer model}"
+    ;;
+  inception:* | mercury:* | auto:mercury* | :mercury*)
+    : "${INCEPTION_API_KEY:?INCEPTION_API_KEY is required for the selected Raven answer model}"
+    ;;
+  *)
+    : "${GROQ_API_KEY:?GROQ_API_KEY is required for the selected Raven answer model}"
+    ;;
+esac
 
 RAVEN_BIN="${RAVEN_BIN:-$ROOT/target/release/freeq-raven}"
 if [[ ! -x "$RAVEN_BIN" ]]; then
