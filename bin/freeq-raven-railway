@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+: "${ALEXANDRIA_INSTANCE_ID:?ALEXANDRIA_INSTANCE_ID is required}"
+: "${ALEXANDRIA_PROJECT_REPO:?ALEXANDRIA_PROJECT_REPO is required}"
+
+ALEXANDRIA_PROJECT_BRANCH="${ALEXANDRIA_PROJECT_BRANCH:-main}"
+ALEXANDRIA_DATA_DIR="${ALEXANDRIA_DATA_DIR:-/data}"
+ALEXANDRIA_PROJECTS_DIR="${ALEXANDRIA_PROJECTS_DIR:-$ALEXANDRIA_DATA_DIR/projects}"
+ALEXANDRIA_PROJECT_DIR="${ALEXANDRIA_PROJECT_DIR:-$ALEXANDRIA_PROJECTS_DIR/$ALEXANDRIA_INSTANCE_ID}"
+ALEXANDRIA_NEXT_ACP_PROVIDER="${ALEXANDRIA_NEXT_ACP_PROVIDER:-claude}"
+ALEXANDRIA_VIEWER_HOST="${ALEXANDRIA_VIEWER_HOST:-0.0.0.0}"
+ALEXANDRIA_VIEWER_PORT="${PORT:-4321}"
+
+export HOME="${ALEXANDRIA_HOST_HOME:-$ALEXANDRIA_DATA_DIR/home}"
+export ALEXANDRIA_AX2_INSTALL_DIR="${ALEXANDRIA_AX2_INSTALL_DIR:-$ALEXANDRIA_PROJECT_DIR/.alexandria-next/bin}"
+export PATH="$ALEXANDRIA_AX2_INSTALL_DIR:$PATH"
+export RAVEN_TOOL_WORKDIR="$ALEXANDRIA_PROJECT_DIR"
+export AX2_BIN="$ALEXANDRIA_AX2_INSTALL_DIR/ax2"
+export RAVEN_ENV_FILE="${RAVEN_ENV_FILE:-/dev/null}"
+
+git_cmd=(git)
+if [[ -n "${GITHUB_TOKEN:-}" ]]; then
+  git_cmd=(git -c "http.https://github.com/.extraheader=AUTHORIZATION: bearer ${GITHUB_TOKEN}")
+fi
+
+mkdir -p "$ALEXANDRIA_PROJECTS_DIR" "$HOME"
+
+if [[ ! -d "$ALEXANDRIA_PROJECT_DIR/.git" ]]; then
+  "${git_cmd[@]}" clone "$ALEXANDRIA_PROJECT_REPO" "$ALEXANDRIA_PROJECT_DIR"
+fi
+
+cd "$ALEXANDRIA_PROJECT_DIR"
+"${git_cmd[@]}" fetch origin "$ALEXANDRIA_PROJECT_BRANCH"
+"${git_cmd[@]}" checkout "$ALEXANDRIA_PROJECT_BRANCH"
+
+if [[ -z "$(git status --porcelain=v1)" ]]; then
+  "${git_cmd[@]}" pull --ff-only origin "$ALEXANDRIA_PROJECT_BRANCH"
+else
+  echo "Target checkout is dirty; skipping fast-forward." >&2
+  git status --short --branch >&2
+fi
+
+curl -fsSL https://getalexandria.ai/install-next.sh \
+  | bash -s -- --yes --init --acp-provider "$ALEXANDRIA_NEXT_ACP_PROVIDER"
+
+"$AX2_BIN" inspect state --json >/tmp/ax2-state.json
+
+cleanup() {
+  if [[ -n "${ax2_pid:-}" ]]; then
+    kill "$ax2_pid" 2>/dev/null || true
+  fi
+  if [[ -n "${raven_pid:-}" ]]; then
+    kill "$raven_pid" 2>/dev/null || true
+  fi
+}
+trap cleanup EXIT INT TERM
+
+"$AX2_BIN" start all \
+  --host "$ALEXANDRIA_VIEWER_HOST" \
+  --port "$ALEXANDRIA_VIEWER_PORT" \
+  --no-codex \
+  --json &
+ax2_pid=$!
+
+cd "$ROOT"
+"$ROOT/bin/freeq-raven" &
+raven_pid=$!
+
+wait -n "$ax2_pid" "$raven_pid"
