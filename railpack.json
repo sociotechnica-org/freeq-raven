@@ -1,0 +1,8 @@
+{
+  "$schema": "https://schema.railpack.com",
+  "provider": "rust",
+  "buildAptPackages": ["pkg-config", "libasound2-dev"],
+  "deploy": {
+    "aptPackages": ["libasound2"]
+  }
+}
