@@ -46,6 +46,26 @@ fi
 curl -fsSL https://getalexandria.ai/install-next.sh \
   | bash -s -- --yes --init --acp-provider "$ALEXANDRIA_NEXT_ACP_PROVIDER"
 
+if [[ -n "${ALEXANDRIA_NEXT_WORKSPACE:-}" ]]; then
+  node - "$ALEXANDRIA_NEXT_WORKSPACE" <<'NODE'
+const fs = require("fs");
+
+const workspace = process.argv[2];
+const configPath = ".alexandria-next/alexandria-config.json";
+const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
+config.workspace = workspace;
+fs.writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`);
+NODE
+
+  mkdir -p \
+    "$ALEXANDRIA_NEXT_WORKSPACE/inbox" \
+    "$ALEXANDRIA_NEXT_WORKSPACE/ledger" \
+    "$ALEXANDRIA_NEXT_WORKSPACE/source-assessments" \
+    "$ALEXANDRIA_NEXT_WORKSPACE/sources/originals" \
+    "$ALEXANDRIA_NEXT_WORKSPACE/sources/processed"
+  touch "$ALEXANDRIA_NEXT_WORKSPACE/ledger/events.jsonl"
+fi
+
 "$AX2_BIN" inspect state --json >/tmp/ax2-state.json
 
 cleanup() {
