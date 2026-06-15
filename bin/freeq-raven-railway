@@ -23,7 +23,8 @@ export RAVEN_ENV_FILE="${RAVEN_ENV_FILE:-$ALEXANDRIA_DATA_DIR/raven.env}"
 
 git_cmd=(git)
 if [[ -n "${GITHUB_TOKEN:-}" ]]; then
-  git_cmd=(git -c "http.https://github.com/.extraheader=AUTHORIZATION: bearer ${GITHUB_TOKEN}")
+  github_basic_auth="$(printf "x-access-token:%s" "$GITHUB_TOKEN" | base64 | tr -d '\n')"
+  git_cmd=(git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${github_basic_auth}")
 fi
 
 mkdir -p "$ALEXANDRIA_PROJECTS_DIR" "$HOME" "$(dirname "$RAVEN_ENV_FILE")"
