@@ -62,8 +62,10 @@ printf '%s\n' "\$*" >> "$TMP_ROOT/ax2.calls"
 
 case "\${1:-}" in
   init)
-    mkdir -p .alexandria-next
-    printf '{"schemaVersion":1,"workspace":"%s"}\n' "\${4:-}" > .alexandria-next/alexandria-config.json
+    if [ ! -f .alexandria-next/alexandria-config.json ]; then
+      mkdir -p .alexandria-next
+      printf '{"schemaVersion":1,"workspace":"%s"}\n' "\${4:-}" > .alexandria-next/alexandria-config.json
+    fi
     ;;
   inspect)
     printf '{}\n'
@@ -98,6 +100,7 @@ assert_contains "--acp-provider" "$TMP_ROOT/install.args"
 assert_contains "claude" "$TMP_ROOT/install.args"
 assert_not_contains "--init" "$TMP_ROOT/install.args"
 assert_contains "init all --workspace .alexandria-next/railway-workspace --acp-provider claude" "$TMP_ROOT/ax2.calls"
+assert_contains '"workspace":".alexandria-next/railway-workspace"' "$TMP_ROOT/data/projects/alexandria-wedo/.alexandria-next/alexandria-config.json"
 
 workspace_link="$TMP_ROOT/data/projects/alexandria-wedo/.alexandria-next/railway-workspace"
 if [ ! -L "$workspace_link" ]; then

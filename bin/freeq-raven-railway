@@ -81,6 +81,7 @@ if [[ -n "${ALEXANDRIA_NEXT_WORKSPACE:-}" ]]; then
     ln -s "$alexandria_workspace_actual" "$alexandria_workspace_config"
   fi
 
+  rm -f .alexandria-next/alexandria-config.json
   "$AX2_BIN" init all \
     --workspace "$alexandria_workspace_config" \
     --acp-provider "$ALEXANDRIA_NEXT_ACP_PROVIDER"
