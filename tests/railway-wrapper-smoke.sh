@@ -97,4 +97,15 @@ assert_contains "--yes" "$TMP_ROOT/install.args"
 assert_contains "--acp-provider" "$TMP_ROOT/install.args"
 assert_contains "claude" "$TMP_ROOT/install.args"
 assert_not_contains "--init" "$TMP_ROOT/install.args"
-assert_contains "init all --workspace $TMP_ROOT/data/workspaces/alexandria-wedo --acp-provider claude" "$TMP_ROOT/ax2.calls"
+assert_contains "init all --workspace .alexandria-next/railway-workspace --acp-provider claude" "$TMP_ROOT/ax2.calls"
+
+workspace_link="$TMP_ROOT/data/projects/alexandria-wedo/.alexandria-next/railway-workspace"
+if [ ! -L "$workspace_link" ]; then
+  echo "Expected $workspace_link to be a symlink" >&2
+  exit 1
+fi
+
+if [ "$(readlink "$workspace_link")" != "$TMP_ROOT/data/workspaces/alexandria-wedo" ]; then
+  echo "Unexpected workspace symlink target: $(readlink "$workspace_link")" >&2
+  exit 1
+fi

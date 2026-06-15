@@ -45,6 +45,7 @@ if [[ "${ALEXANDRIA_CLEAN_GENERATED:-1}" = "1" ]]; then
   rm -rf \
     .alexandria-next/bin \
     .alexandria-next/demo-workspace \
+    .alexandria-next/railway-workspace \
     .alexandria-next/sources.jsonl \
     .claude/plugins/alexandria-next
 fi
@@ -68,17 +69,29 @@ curl -fsSL https://getalexandria.ai/install-next.sh \
   | bash -s -- "${install_args[@]}"
 
 if [[ -n "${ALEXANDRIA_NEXT_WORKSPACE:-}" ]]; then
+  alexandria_workspace_config="$ALEXANDRIA_NEXT_WORKSPACE"
+  alexandria_workspace_actual="$ALEXANDRIA_NEXT_WORKSPACE"
+
+  if [[ "$ALEXANDRIA_NEXT_WORKSPACE" = /* ]]; then
+    alexandria_workspace_config="${ALEXANDRIA_NEXT_WORKSPACE_LINK:-.alexandria-next/railway-workspace}"
+    alexandria_workspace_actual="$ALEXANDRIA_NEXT_WORKSPACE"
+
+    mkdir -p "$(dirname "$alexandria_workspace_config")" "$alexandria_workspace_actual"
+    rm -rf "$alexandria_workspace_config"
+    ln -s "$alexandria_workspace_actual" "$alexandria_workspace_config"
+  fi
+
   "$AX2_BIN" init all \
-    --workspace "$ALEXANDRIA_NEXT_WORKSPACE" \
+    --workspace "$alexandria_workspace_config" \
     --acp-provider "$ALEXANDRIA_NEXT_ACP_PROVIDER"
 
   mkdir -p \
-    "$ALEXANDRIA_NEXT_WORKSPACE/inbox" \
-    "$ALEXANDRIA_NEXT_WORKSPACE/ledger" \
-    "$ALEXANDRIA_NEXT_WORKSPACE/source-assessments" \
-    "$ALEXANDRIA_NEXT_WORKSPACE/sources/originals" \
-    "$ALEXANDRIA_NEXT_WORKSPACE/sources/processed"
-  touch "$ALEXANDRIA_NEXT_WORKSPACE/ledger/events.jsonl"
+    "$alexandria_workspace_actual/inbox" \
+    "$alexandria_workspace_actual/ledger" \
+    "$alexandria_workspace_actual/source-assessments" \
+    "$alexandria_workspace_actual/sources/originals" \
+    "$alexandria_workspace_actual/sources/processed"
+  touch "$alexandria_workspace_actual/ledger/events.jsonl"
 fi
 
 "$AX2_BIN" inspect state --json >/tmp/ax2-state.json
