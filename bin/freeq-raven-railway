@@ -19,14 +19,15 @@ export ALEXANDRIA_AX2_INSTALL_DIR="${ALEXANDRIA_AX2_INSTALL_DIR:-$ALEXANDRIA_PRO
 export PATH="$ALEXANDRIA_AX2_INSTALL_DIR:$PATH"
 export RAVEN_TOOL_WORKDIR="$ALEXANDRIA_PROJECT_DIR"
 export AX2_BIN="$ALEXANDRIA_AX2_INSTALL_DIR/ax2"
-export RAVEN_ENV_FILE="${RAVEN_ENV_FILE:-/dev/null}"
+export RAVEN_ENV_FILE="${RAVEN_ENV_FILE:-$ALEXANDRIA_DATA_DIR/raven.env}"
 
 git_cmd=(git)
 if [[ -n "${GITHUB_TOKEN:-}" ]]; then
   git_cmd=(git -c "http.https://github.com/.extraheader=AUTHORIZATION: bearer ${GITHUB_TOKEN}")
 fi
 
-mkdir -p "$ALEXANDRIA_PROJECTS_DIR" "$HOME"
+mkdir -p "$ALEXANDRIA_PROJECTS_DIR" "$HOME" "$(dirname "$RAVEN_ENV_FILE")"
+touch "$RAVEN_ENV_FILE"
 
 if [[ ! -d "$ALEXANDRIA_PROJECT_DIR/.git" ]]; then
   "${git_cmd[@]}" clone "$ALEXANDRIA_PROJECT_REPO" "$ALEXANDRIA_PROJECT_DIR"
