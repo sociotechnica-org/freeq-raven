@@ -1,0 +1,31 @@
+FROM rust:1.96-bookworm AS builder
+
+WORKDIR /app
+
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends \
+    libasound2-dev \
+    pkg-config \
+  && rm -rf /var/lib/apt/lists/*
+
+COPY . .
+
+RUN cargo build --release -p freeq-raven
+
+FROM ubuntu:24.04
+
+WORKDIR /app
+
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    git \
+    libasound2t64 \
+    nodejs \
+    npm \
+  && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /app /app
+
+CMD ["./bin/freeq-raven-railway"]

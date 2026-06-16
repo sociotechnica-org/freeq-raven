@@ -14,10 +14,6 @@ set -a
 source "$ENV_FILE"
 set +a
 
-: "${ELEVENLABS_API_KEY:?ELEVENLABS_API_KEY is required}"
-: "${DEEPGRAM_API_KEY:?DEEPGRAM_API_KEY is required}"
-: "${INCEPTION_API_KEY:?INCEPTION_API_KEY is required}"
-
 export FREEQ_SERVER="${FREEQ_SERVER:-wss://irc.freeq.at/irc}"
 export FREEQ_CHANNEL="${FREEQ_CHANNEL:-#alexandria}"
 export RAVEN_FREEQ_NICK="${RAVEN_FREEQ_NICK:-Raven}"

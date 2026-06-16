@@ -1,0 +1,5 @@
+.git
+.runtime
+.env
+.DS_Store
+target
