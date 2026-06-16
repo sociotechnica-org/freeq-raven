@@ -73,6 +73,9 @@ case "\${1:-}" in
   start)
     sleep 0.1
     ;;
+  internal)
+    sleep 0.1
+    ;;
 esac
 SH
 chmod +x "$TMP_ROOT/axbin/ax2"
@@ -100,6 +103,7 @@ assert_contains "--acp-provider" "$TMP_ROOT/install.args"
 assert_contains "claude" "$TMP_ROOT/install.args"
 assert_not_contains "--init" "$TMP_ROOT/install.args"
 assert_contains "init all --workspace .alexandria-next/railway-workspace --acp-provider claude" "$TMP_ROOT/ax2.calls"
+assert_contains "internal host freeq-raven heartbeat --connection host:freeq-raven:alexandria-wedo --follow --poll-interval-ms 1000" "$TMP_ROOT/ax2.calls"
 assert_contains '"workspace":".alexandria-next/railway-workspace"' "$TMP_ROOT/data/projects/alexandria-wedo/.alexandria-next/alexandria-config.json"
 
 workspace_link="$TMP_ROOT/data/projects/alexandria-wedo/.alexandria-next/railway-workspace"

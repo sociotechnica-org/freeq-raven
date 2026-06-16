@@ -13,6 +13,8 @@ ALEXANDRIA_PROJECT_DIR="${ALEXANDRIA_PROJECT_DIR:-$ALEXANDRIA_PROJECTS_DIR/$ALEX
 ALEXANDRIA_NEXT_ACP_PROVIDER="${ALEXANDRIA_NEXT_ACP_PROVIDER:-claude}"
 ALEXANDRIA_VIEWER_HOST="${ALEXANDRIA_VIEWER_HOST:-0.0.0.0}"
 ALEXANDRIA_VIEWER_PORT="${PORT:-4321}"
+ALEXANDRIA_FREEQ_RAVEN_CONNECTION_ID="${ALEXANDRIA_FREEQ_RAVEN_CONNECTION_ID:-host:freeq-raven:$ALEXANDRIA_INSTANCE_ID}"
+ALEXANDRIA_FREEQ_RAVEN_HEARTBEAT_INTERVAL_MS="${ALEXANDRIA_FREEQ_RAVEN_HEARTBEAT_INTERVAL_MS:-1000}"
 
 export HOME="${ALEXANDRIA_HOST_HOME:-$ALEXANDRIA_DATA_DIR/home}"
 export ALEXANDRIA_AX2_INSTALL_DIR="${ALEXANDRIA_AX2_INSTALL_DIR:-$ALEXANDRIA_PROJECT_DIR/.alexandria-next/bin}"
@@ -102,6 +104,9 @@ cleanup() {
   if [[ -n "${ax2_pid:-}" ]]; then
     kill "$ax2_pid" 2>/dev/null || true
   fi
+  if [[ -n "${heartbeat_pid:-}" ]]; then
+    kill "$heartbeat_pid" 2>/dev/null || true
+  fi
   if [[ -n "${raven_pid:-}" ]]; then
     kill "$raven_pid" 2>/dev/null || true
   fi
@@ -115,6 +120,12 @@ trap cleanup EXIT INT TERM
   --json &
 ax2_pid=$!
 
+"$AX2_BIN" internal host freeq-raven heartbeat \
+  --connection "$ALEXANDRIA_FREEQ_RAVEN_CONNECTION_ID" \
+  --follow \
+  --poll-interval-ms "$ALEXANDRIA_FREEQ_RAVEN_HEARTBEAT_INTERVAL_MS" &
+heartbeat_pid=$!
+
 cd "$ROOT"
 "$ROOT/bin/freeq-raven" &
 raven_pid=$!
@@ -122,6 +133,11 @@ raven_pid=$!
 while true; do
   if ! kill -0 "$ax2_pid" 2>/dev/null; then
     wait "$ax2_pid"
+    exit $?
+  fi
+
+  if ! kill -0 "$heartbeat_pid" 2>/dev/null; then
+    wait "$heartbeat_pid"
     exit $?
   fi
 
