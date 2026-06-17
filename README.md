@@ -13,8 +13,8 @@ belongs here, not in Freeq examples.
   fixes should go there directly.
 - `sociotechnica-org/freeq-raven`: Raven product behavior, prompts, model
   routing, local launch/deployment, and tool handoff policy.
-- target product repos: the work Raven inspects or edits when she runs Codex,
-  Alexandria, Fabro, tests, or deployment tools.
+- target product repos: the work Raven inspects or edits when she runs Claude
+  Code, Alexandria, Fabro, tests, or deployment tools.
 
 This repo depends on Freeq crates from `chad/freeq` by git revision. It does not
 vendor or patch `freeq-eliza`.
@@ -29,8 +29,10 @@ freeq-raven/
   bin/
     freeq-raven           # loads .env and execs target/release/freeq-raven
     freeq-raven-start     # background/tmux launcher
-    raven-tool-runner     # Codex handoff command
+    raven-claude-runner   # Claude Code handoff command
+    raven-tool-runner     # legacy Codex handoff fallback
   ops/
+    alexandria-instance-runbook.md
     systemd/              # Linux service template
 ```
 
@@ -93,7 +95,8 @@ Raven joins `irc.freeq.at` and `#alexandria` by default.
 - Rust toolchain with `cargo`
 - Git
 - optional: `tmux` for durable local background runs
-- optional: authenticated `codex` CLI for heavy-work handoff
+- authenticated Claude Code CLI for local heavy-work handoff, or a Tailnet-only
+  Claude Code worker endpoint for hosted Railway handoff
 - API keys for the live AV loop:
   - `INCEPTION_API_KEY`
   - `DEEPGRAM_API_KEY`
@@ -123,6 +126,7 @@ FREEQ_CHANNEL=#alexandria
 RAVEN_FREEQ_NICK=Raven
 RAVEN_IDENTITY_NAME=raven
 RAVEN_TOOL_WORKDIR=/absolute/path/to/target-product-repo
+RAVEN_TOOL_COMMAND=/absolute/path/to/freeq-raven/bin/raven-claude-runner
 ```
 
 Never commit `.env`. It contains live provider keys.
@@ -190,16 +194,38 @@ The local wrapper writes:
 `RAVEN_TOOL_COMMAND` receives JSON on stdin. The default command is:
 
 ```bash
-bin/raven-tool-runner
+bin/raven-claude-runner
 ```
 
-The runner executes Codex in `RAVEN_TOOL_WORKDIR`, which should be the target
-product repository. It should not operate in Alexandria's private maintainer
-repo unless the room explicitly asks Raven to inspect Alexandria itself.
+The runner executes Claude Code in `RAVEN_TOOL_WORKDIR`, which should be the
+target product repository. It should not operate in Alexandria's private
+maintainer repo unless the room explicitly asks Raven to inspect Alexandria
+itself.
+
+For hosted Railway instances, keep Claude Code on a trusted Tailnet machine and
+set `RAVEN_CLAUDE_ENDPOINT` so `bin/raven-claude-runner` forwards the JSON
+payload to that worker. Claude Code returns stdout to Raven; it does not join
+Freeq or post to rooms directly.
+
+The legacy Codex runner remains available as `bin/raven-tool-runner` for
+explicit fallback only.
 
 Alexandria/Fabro integration should happen through project-local/public
 Alexandria tooling installed in the target product repo. Private maintainer
 skills are intentionally outside this repo's runtime contract.
+
+## Hosted Alexandria Instances
+
+Use [`ops/alexandria-instance-runbook.md`](ops/alexandria-instance-runbook.md)
+when adding a new Raven/Alexandria instance for a project/channel pair.
+
+The short version:
+
+- one Raven process per Freeq channel;
+- one `RAVEN_TOOL_WORKDIR` per target project repo;
+- one Claude Code worker endpoint per hosted instance;
+- no `freeqcc` daemon in this path;
+- no direct Claude Code posting to Freeq.
 
 ## Systemd Deployment
 

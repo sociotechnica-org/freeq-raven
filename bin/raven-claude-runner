@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${RAVEN_TOOL_WORKDIR:-$(pwd)}"
+AX2_BIN="${AX2_BIN:-$ROOT/.alexandria-next/bin/ax2}"
+
+payload="$(cat)"
+
+if [[ -n "${RAVEN_CLAUDE_ENDPOINT:-}" ]]; then
+  curl_args=(
+    curl
+    -fsS
+    -X POST
+    -H "Content-Type: application/json"
+  )
+  if [[ -n "${RAVEN_CLAUDE_ENDPOINT_TOKEN:-}" ]]; then
+    curl_args+=(-H "Authorization: Bearer $RAVEN_CLAUDE_ENDPOINT_TOKEN")
+  fi
+  curl_args+=(--data-binary @- "$RAVEN_CLAUDE_ENDPOINT")
+  printf '%s\n' "$payload" | "${curl_args[@]}"
+  exit 0
+fi
+
+if ! command -v claude >/dev/null 2>&1; then
+  echo "Claude Code heavy-work runner failed: 'claude' is not on PATH." >&2
+  echo "Install and authenticate Claude Code on this trusted machine, or set" >&2
+  echo "RAVEN_CLAUDE_ENDPOINT to a Tailnet-only Claude Code worker." >&2
+  exit 127
+fi
+
+prompt_file="$(mktemp "${TMPDIR:-/tmp}/raven-claude-prompt.XXXXXX")"
+log_file="$(mktemp "${TMPDIR:-/tmp}/raven-claude-log.XXXXXX")"
+out_file="$(mktemp "${TMPDIR:-/tmp}/raven-claude-out.XXXXXX")"
+trap 'rm -f "$prompt_file" "$log_file" "$out_file"' EXIT
+
+cat >"$prompt_file" <<PROMPT
+You are Raven's Claude Code heavy-work runner for a Freeq room.
+
+You are running in the target product repository:
+$ROOT
+
+Use this boundary:
+- Normal conversation has already been handled by the Freeq/Raven/Mercury runtime.
+- You are invoked only for heavier work: repository inspection or edits, Alexandria Product plays, Fabro workflows, tests, deployments, GitHub work, or implementation planning.
+- The payload route is either tool_now or background. For background, do not ask the live room to wait; make useful progress and return a concise status/result when done.
+- Use project-local tools first. If present, the Alexandria Next CLI is:
+  $AX2_BIN
+- If the request asks for an Alexandria Product play, use the project-local AX2/Fabro setup.
+- Use Fabro only through the local target-product setup unless the user explicitly directs otherwise.
+- Do not use, reference, or depend on private alexandria-internal maintainer skills.
+- Do not switch to the alexandria-internal repository unless the room explicitly asks to inspect Alexandria itself.
+- Keep your final answer concise and suitable for posting back into Freeq chat.
+- Do not try to join Freeq or post to Freeq yourself. Your final stdout is returned to the room by the runtime.
+
+Freeq payload JSON:
+PROMPT
+printf '%s\n' "$payload" >>"$prompt_file"
+
+cmd=(claude --print --output-format text)
+
+permission_mode="${RAVEN_CLAUDE_PERMISSION_MODE:-bypassPermissions}"
+if [[ -n "$permission_mode" ]]; then
+  cmd+=(--permission-mode "$permission_mode")
+fi
+
+model="${RAVEN_CLAUDE_MODEL:-${RAVEN_TOOL_MODEL:-}}"
+if [[ -n "$model" ]]; then
+  cmd+=(--model "$model")
+fi
+
+if ! (cd "$ROOT" && "${cmd[@]}" <"$prompt_file" >"$out_file" 2>"$log_file"); then
+  echo "Claude Code heavy-work runner failed."
+  tail -80 "$log_file"
+  exit 1
+fi
+
+if [[ -s "$out_file" ]]; then
+  cat "$out_file"
+else
+  tail -80 "$log_file"
+fi

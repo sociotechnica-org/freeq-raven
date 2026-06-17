@@ -21,6 +21,7 @@ logs:
 
 check:
 	./bin/freeq-raven-bootstrap --check
+	./tests/raven-claude-runner-smoke.sh
 
 test:
 	cargo test -p freeq-raven --lib

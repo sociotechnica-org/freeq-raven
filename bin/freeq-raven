@@ -24,7 +24,7 @@ export RAVEN_ANSWER_MODEL="${RAVEN_ANSWER_MODEL:-mercury-2}"
 export INCEPTION_REASONING_EFFORT="${INCEPTION_REASONING_EFFORT:-instant}"
 export RAVEN_RENDER_BACKEND="${RAVEN_RENDER_BACKEND:-svg}"
 export RAVEN_TOOL_WORKDIR="${RAVEN_TOOL_WORKDIR:-$ROOT}"
-export RAVEN_TOOL_COMMAND="${RAVEN_TOOL_COMMAND:-$ROOT/bin/raven-tool-runner}"
+export RAVEN_TOOL_COMMAND="${RAVEN_TOOL_COMMAND:-$ROOT/bin/raven-claude-runner}"
 export RUST_LOG="${RAVEN_RUST_LOG:-freeq_raven=info,freeq_sdk=info,freeq_av=info,moq_native=warn}"
 
 RAVEN_BIN="${RAVEN_BIN:-$ROOT/target/release/freeq-raven}"
