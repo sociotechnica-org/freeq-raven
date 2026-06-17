@@ -10,120 +10,123 @@ ALEXANDRIA_PROJECT_BRANCH="${ALEXANDRIA_PROJECT_BRANCH:-main}"
 ALEXANDRIA_DATA_DIR="${ALEXANDRIA_DATA_DIR:-/data}"
 ALEXANDRIA_PROJECTS_DIR="${ALEXANDRIA_PROJECTS_DIR:-$ALEXANDRIA_DATA_DIR/projects}"
 ALEXANDRIA_PROJECT_DIR="${ALEXANDRIA_PROJECT_DIR:-$ALEXANDRIA_PROJECTS_DIR/$ALEXANDRIA_INSTANCE_ID}"
-ALEXANDRIA_NEXT_ACP_PROVIDER="${ALEXANDRIA_NEXT_ACP_PROVIDER:-claude}"
+ALEXANDRIA_ACP_PROVIDER="${ALEXANDRIA_ACP_PROVIDER:-${ALEXANDRIA_NEXT_ACP_PROVIDER:-claude}}"
 ALEXANDRIA_VIEWER_HOST="${ALEXANDRIA_VIEWER_HOST:-0.0.0.0}"
 ALEXANDRIA_VIEWER_PORT="${PORT:-4321}"
 ALEXANDRIA_FREEQ_RAVEN_CONNECTION_ID="${ALEXANDRIA_FREEQ_RAVEN_CONNECTION_ID:-host:freeq-raven:$ALEXANDRIA_INSTANCE_ID}"
 ALEXANDRIA_FREEQ_RAVEN_HEARTBEAT_INTERVAL_MS="${ALEXANDRIA_FREEQ_RAVEN_HEARTBEAT_INTERVAL_MS:-1000}"
 
 export HOME="${ALEXANDRIA_HOST_HOME:-$ALEXANDRIA_DATA_DIR/home}"
-export ALEXANDRIA_AX2_INSTALL_DIR="${ALEXANDRIA_AX2_INSTALL_DIR:-$ALEXANDRIA_PROJECT_DIR/.alexandria-next/bin}"
-export PATH="$ALEXANDRIA_AX2_INSTALL_DIR:$PATH"
+export ALEXANDRIA_AX_INSTALL_DIR="${ALEXANDRIA_AX_INSTALL_DIR:-${ALEXANDRIA_AX2_INSTALL_DIR:-$ALEXANDRIA_PROJECT_DIR/.alexandria-next/bin}}"
+export ALEXANDRIA_AX2_INSTALL_DIR="$ALEXANDRIA_AX_INSTALL_DIR"
+export PATH="$ALEXANDRIA_AX_INSTALL_DIR:$PATH"
 export RAVEN_TOOL_WORKDIR="$ALEXANDRIA_PROJECT_DIR"
-export AX2_BIN="$ALEXANDRIA_AX2_INSTALL_DIR/ax2"
+export AX_BIN="${AX_BIN:-$ALEXANDRIA_AX_INSTALL_DIR/ax}"
+export AX2_BIN="${AX2_BIN:-$AX_BIN}"
 export RAVEN_ENV_FILE="${RAVEN_ENV_FILE:-$ALEXANDRIA_DATA_DIR/raven.env}"
 
 git_cmd=(git)
 if [[ -n "${GITHUB_TOKEN:-}" ]]; then
-  github_basic_auth="$(printf "x-access-token:%s" "$GITHUB_TOKEN" | base64 | tr -d '\n')"
-  git_cmd=(git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${github_basic_auth}")
+	github_basic_auth="$(printf "x-access-token:%s" "$GITHUB_TOKEN" | base64 | tr -d '\n')"
+	git_cmd=(git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${github_basic_auth}")
 fi
 
 mkdir -p "$ALEXANDRIA_PROJECTS_DIR" "$HOME" "$(dirname "$RAVEN_ENV_FILE")"
 touch "$RAVEN_ENV_FILE"
 
 if [[ ! -d "$ALEXANDRIA_PROJECT_DIR/.git" ]]; then
-  "${git_cmd[@]}" clone "$ALEXANDRIA_PROJECT_REPO" "$ALEXANDRIA_PROJECT_DIR"
+	"${git_cmd[@]}" clone "$ALEXANDRIA_PROJECT_REPO" "$ALEXANDRIA_PROJECT_DIR"
 fi
 
 cd "$ALEXANDRIA_PROJECT_DIR"
 
 if [[ "${ALEXANDRIA_CLEAN_GENERATED:-1}" = "1" ]]; then
-  if git ls-files --error-unmatch .alexandria-next/alexandria-config.json >/dev/null 2>&1; then
-    git restore .alexandria-next/alexandria-config.json
-  else
-    rm -f .alexandria-next/alexandria-config.json
-  fi
+	if git ls-files --error-unmatch .alexandria-next/alexandria-config.json >/dev/null 2>&1; then
+		git restore .alexandria-next/alexandria-config.json
+	else
+		rm -f .alexandria-next/alexandria-config.json
+	fi
 
-  rm -rf \
-    .alexandria-next/bin \
-    .alexandria-next/demo-workspace \
-    .alexandria-next/railway-workspace \
-    .alexandria-next/sources.jsonl \
-    .claude/plugins/alexandria-next
+	rm -rf \
+		.alexandria-next/bin \
+		.alexandria-next/demo-workspace \
+		.alexandria-next/railway-workspace \
+		.alexandria-next/sources.jsonl \
+		.claude/plugins/alexandria \
+		.claude/plugins/alexandria-next
 fi
 
 "${git_cmd[@]}" fetch origin "$ALEXANDRIA_PROJECT_BRANCH"
 "${git_cmd[@]}" checkout "$ALEXANDRIA_PROJECT_BRANCH"
 
 if [[ -z "$(git status --porcelain=v1)" ]]; then
-  "${git_cmd[@]}" pull --ff-only origin "$ALEXANDRIA_PROJECT_BRANCH"
+	"${git_cmd[@]}" pull --ff-only origin "$ALEXANDRIA_PROJECT_BRANCH"
 else
-  echo "Target checkout is dirty; skipping fast-forward." >&2
-  git status --short --branch >&2
+	echo "Target checkout is dirty; skipping fast-forward." >&2
+	git status --short --branch >&2
 fi
 
-install_args=(--yes --acp-provider "$ALEXANDRIA_NEXT_ACP_PROVIDER")
+install_args=(--yes --acp-provider "$ALEXANDRIA_ACP_PROVIDER")
 if [[ -z "${ALEXANDRIA_NEXT_WORKSPACE:-}" ]]; then
-  install_args+=(--init)
+	install_args+=(--init)
 fi
 
-curl -fsSL https://getalexandria.ai/install-next.sh \
-  | bash -s -- "${install_args[@]}"
+curl -fsSL https://getalexandria.ai/install.sh |
+	bash -s -- "${install_args[@]}"
 
 if [[ -n "${ALEXANDRIA_NEXT_WORKSPACE:-}" ]]; then
-  alexandria_workspace_config="$ALEXANDRIA_NEXT_WORKSPACE"
-  alexandria_workspace_actual="$ALEXANDRIA_NEXT_WORKSPACE"
+	alexandria_workspace_config="$ALEXANDRIA_NEXT_WORKSPACE"
+	alexandria_workspace_actual="$ALEXANDRIA_NEXT_WORKSPACE"
 
-  if [[ "$ALEXANDRIA_NEXT_WORKSPACE" = /* ]]; then
-    alexandria_workspace_config="${ALEXANDRIA_NEXT_WORKSPACE_LINK:-.alexandria-next/railway-workspace}"
-    alexandria_workspace_actual="$ALEXANDRIA_NEXT_WORKSPACE"
+	if [[ "$ALEXANDRIA_NEXT_WORKSPACE" = /* ]]; then
+		alexandria_workspace_config="${ALEXANDRIA_NEXT_WORKSPACE_LINK:-.alexandria-next/railway-workspace}"
+		alexandria_workspace_actual="$ALEXANDRIA_NEXT_WORKSPACE"
 
-    mkdir -p "$(dirname "$alexandria_workspace_config")" "$alexandria_workspace_actual"
-    rm -rf "$alexandria_workspace_config"
-    ln -s "$alexandria_workspace_actual" "$alexandria_workspace_config"
-  fi
+		mkdir -p "$(dirname "$alexandria_workspace_config")" "$alexandria_workspace_actual"
+		rm -rf "$alexandria_workspace_config"
+		ln -s "$alexandria_workspace_actual" "$alexandria_workspace_config"
+	fi
 
-  rm -f .alexandria-next/alexandria-config.json
-  "$AX2_BIN" init all \
-    --workspace "$alexandria_workspace_config" \
-    --acp-provider "$ALEXANDRIA_NEXT_ACP_PROVIDER"
+	rm -f .alexandria-next/alexandria-config.json
+	"$AX2_BIN" init all \
+		--workspace "$alexandria_workspace_config" \
+		--acp-provider "$ALEXANDRIA_ACP_PROVIDER"
 
-  mkdir -p \
-    "$alexandria_workspace_actual/inbox" \
-    "$alexandria_workspace_actual/ledger" \
-    "$alexandria_workspace_actual/source-assessments" \
-    "$alexandria_workspace_actual/sources/originals" \
-    "$alexandria_workspace_actual/sources/processed"
-  touch "$alexandria_workspace_actual/ledger/events.jsonl"
+	mkdir -p \
+		"$alexandria_workspace_actual/inbox" \
+		"$alexandria_workspace_actual/ledger" \
+		"$alexandria_workspace_actual/source-assessments" \
+		"$alexandria_workspace_actual/sources/originals" \
+		"$alexandria_workspace_actual/sources/processed"
+	touch "$alexandria_workspace_actual/ledger/events.jsonl"
 fi
 
 "$AX2_BIN" inspect state --json >/tmp/ax2-state.json
 
 cleanup() {
-  if [[ -n "${ax2_pid:-}" ]]; then
-    kill "$ax2_pid" 2>/dev/null || true
-  fi
-  if [[ -n "${heartbeat_pid:-}" ]]; then
-    kill "$heartbeat_pid" 2>/dev/null || true
-  fi
-  if [[ -n "${raven_pid:-}" ]]; then
-    kill "$raven_pid" 2>/dev/null || true
-  fi
+	if [[ -n "${ax2_pid:-}" ]]; then
+		kill "$ax2_pid" 2>/dev/null || true
+	fi
+	if [[ -n "${heartbeat_pid:-}" ]]; then
+		kill "$heartbeat_pid" 2>/dev/null || true
+	fi
+	if [[ -n "${raven_pid:-}" ]]; then
+		kill "$raven_pid" 2>/dev/null || true
+	fi
 }
 trap cleanup EXIT INT TERM
 
 "$AX2_BIN" start all \
-  --host "$ALEXANDRIA_VIEWER_HOST" \
-  --port "$ALEXANDRIA_VIEWER_PORT" \
-  --no-codex \
-  --json &
+	--host "$ALEXANDRIA_VIEWER_HOST" \
+	--port "$ALEXANDRIA_VIEWER_PORT" \
+	--no-codex \
+	--json &
 ax2_pid=$!
 
 "$AX2_BIN" internal host freeq-raven heartbeat \
-  --connection "$ALEXANDRIA_FREEQ_RAVEN_CONNECTION_ID" \
-  --follow \
-  --poll-interval-ms "$ALEXANDRIA_FREEQ_RAVEN_HEARTBEAT_INTERVAL_MS" &
+	--connection "$ALEXANDRIA_FREEQ_RAVEN_CONNECTION_ID" \
+	--follow \
+	--poll-interval-ms "$ALEXANDRIA_FREEQ_RAVEN_HEARTBEAT_INTERVAL_MS" &
 heartbeat_pid=$!
 
 cd "$ROOT"
@@ -131,20 +134,20 @@ cd "$ROOT"
 raven_pid=$!
 
 while true; do
-  if ! kill -0 "$ax2_pid" 2>/dev/null; then
-    wait "$ax2_pid"
-    exit $?
-  fi
+	if ! kill -0 "$ax2_pid" 2>/dev/null; then
+		wait "$ax2_pid"
+		exit $?
+	fi
 
-  if ! kill -0 "$heartbeat_pid" 2>/dev/null; then
-    wait "$heartbeat_pid"
-    exit $?
-  fi
+	if ! kill -0 "$heartbeat_pid" 2>/dev/null; then
+		wait "$heartbeat_pid"
+		exit $?
+	fi
 
-  if ! kill -0 "$raven_pid" 2>/dev/null; then
-    wait "$raven_pid"
-    exit $?
-  fi
+	if ! kill -0 "$raven_pid" 2>/dev/null; then
+		wait "$raven_pid"
+		exit $?
+	fi
 
-  sleep 1
+	sleep 1
 done
