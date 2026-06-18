@@ -167,7 +167,11 @@ fn missing_answer_config(cfg: &SharedConfig) -> Option<String> {
     }
 }
 
-const SESSION_CONTEXT_MAX_LINES: usize = 200;
+/// Max recent lines fed to *live* Q&A, to keep the answer prompt
+/// bounded in cost / latency / context-window. The full session history
+/// is retained unbounded (see `record_session_line`) so the end-of-call
+/// transcript + summary are complete.
+const SESSION_CONTEXT_QA_TAIL_LINES: usize = 200;
 
 fn record_session_line(cfg: &SharedConfig, channel: &str, source: &str, speaker: &str, text: &str) {
     let text = text.trim();
@@ -180,10 +184,9 @@ fn record_session_line(cfg: &SharedConfig, channel: &str, source: &str, speaker:
         .expect("session context poisoned");
     let lines = guard.entry(channel.to_string()).or_default();
     lines.push(format!("{speaker} [{source}]: {text}"));
-    let overflow = lines.len().saturating_sub(SESSION_CONTEXT_MAX_LINES);
-    if overflow > 0 {
-        lines.drain(0..overflow);
-    }
+    // No cap on storage: the full session history is retained so the
+    // end-of-call transcript + summary are complete. Live Q&A bounds its
+    // own prompt with `session_context_tail`.
 }
 
 fn session_context_snapshot(cfg: &SharedConfig, channel: &str) -> String {
@@ -192,6 +195,21 @@ fn session_context_snapshot(cfg: &SharedConfig, channel: &str) -> String {
         .expect("session context poisoned")
         .get(channel)
         .map(|lines| lines.join("\n"))
+        .unwrap_or_default()
+}
+
+/// Last `max` lines of the rolling session context, joined. Feeds live
+/// Q&A so the answer prompt stays bounded even on a long call; the full
+/// history is available via [`session_context_snapshot`].
+fn session_context_tail(cfg: &SharedConfig, channel: &str, max: usize) -> String {
+    cfg.session_context
+        .lock()
+        .expect("session context poisoned")
+        .get(channel)
+        .map(|lines| {
+            let start = lines.len().saturating_sub(max);
+            lines[start..].join("\n")
+        })
         .unwrap_or_default()
 }
 
@@ -207,9 +225,9 @@ fn clear_session_context(cfg: &SharedConfig, channel: &str) {
 /// target repo) so the conversation becomes a durable input the
 /// post-call factory run can consume. Returns the written path.
 ///
-/// The transcript is the rolling session context (capped at
-/// `SESSION_CONTEXT_MAX_LINES`); the decisions are the complete
-/// per-channel commitment log. Best-effort — the caller logs failures.
+/// The transcript is the full rolling session context (no cap); the
+/// decisions are the complete per-channel commitment log. Best-effort —
+/// the caller logs failures.
 fn write_session_transcript(
     workdir: &std::path::Path,
     channel: &str,
@@ -1033,7 +1051,7 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
                 // A typed question gets a typed answer — pass no speaker
                 // or video so `answer_and_speak` posts text rather than
                 // speaking it. The call transcript is still useful context.
-                let transcript = session_context_snapshot(&cfg, &target);
+                let transcript = session_context_tail(&cfg, &target, SESSION_CONTEXT_QA_TAIL_LINES);
                 let cfg = cfg.clone();
                 let handle = handle_arc.clone();
                 let channel = target.clone();
@@ -2361,7 +2379,7 @@ async fn transcribe_participant(
                                     call.speaker.clear();
                                     call.last_answer = Some(Instant::now());
                                     Some((
-                                        session_context_snapshot(&cfg, &channel),
+                                        session_context_tail(&cfg, &channel, SESSION_CONTEXT_QA_TAIL_LINES),
                                         call.speaker.clone(),
                                         call.video.clone(),
                                     ))
@@ -2377,7 +2395,7 @@ async fn transcribe_participant(
                                 {
                                     call.last_answer = Some(Instant::now());
                                     Some((
-                                        session_context_snapshot(&cfg, &channel),
+                                        session_context_tail(&cfg, &channel, SESSION_CONTEXT_QA_TAIL_LINES),
                                         call.speaker.clone(),
                                         call.video.clone(),
                                     ))
