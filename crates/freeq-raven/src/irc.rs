@@ -10,6 +10,7 @@
 //! call while we're transcribing one, we log and skip.
 
 use std::collections::HashMap;
+use std::io::Write;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -201,6 +202,60 @@ fn clear_session_context(cfg: &SharedConfig, channel: &str) {
         .remove(channel);
 }
 
+/// Persist the end-of-session transcript + decision read-back to a
+/// timestamped Markdown file in `workdir` (the `RAVEN_TOOL_WORKDIR`
+/// target repo) so the conversation becomes a durable input the
+/// post-call factory run can consume. Returns the written path.
+///
+/// The transcript is the rolling session context (capped at
+/// `SESSION_CONTEXT_MAX_LINES`); the decisions are the complete
+/// per-channel commitment log. Best-effort — the caller logs failures.
+fn write_session_transcript(
+    workdir: &std::path::Path,
+    channel: &str,
+    transcript: &str,
+    decisions: &[crate::decisions::Decision],
+) -> std::io::Result<std::path::PathBuf> {
+    let now = chrono::Utc::now();
+    let ts = now.format("%Y%m%dT%H%M%SZ").to_string();
+    let file_ts = now.format("%Y%m%dT%H%M%S%.6fZ").to_string();
+    let slug: String = channel
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    let path = workdir.join(format!("session-{slug}-{file_ts}.md"));
+
+    let mut out = String::new();
+    out.push_str(&format!("# Session transcript — {channel}\n\nEnded: {ts}\n\n"));
+
+    out.push_str("## Decisions\n\n");
+    if decisions.is_empty() {
+        out.push_str("_(none captured)_\n\n");
+    } else {
+        for d in decisions {
+            match &d.when {
+                Some(w) => out.push_str(&format!("- {} — {} (by {})\n", d.who, d.what, w)),
+                None => out.push_str(&format!("- {} — {}\n", d.who, d.what)),
+            }
+        }
+        out.push('\n');
+    }
+
+    out.push_str("## Transcript\n\n");
+    if transcript.is_empty() {
+        out.push_str("_(empty)_\n");
+    } else {
+        out.push_str(transcript);
+        out.push('\n');
+    }
+
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)?
+        .write_all(out.as_bytes())?;
+    Ok(path)
+}
 use crate::imagegen::AiImageConfig;
 use crate::stt::{SttEngine, to_whisper_pcm};
 use crate::video::VideoTile;
@@ -821,6 +876,34 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
                                     None => format!("  • {} — {}", d.who, d.what),
                                 };
                                 let _ = handle.privmsg(&channel_for_post, &line).await;
+                            }
+                        }
+
+                        // Persist the transcript + decisions to the target
+                        // repo (RAVEN_TOOL_WORKDIR) so the conversation
+                        // becomes a durable input for the post-call factory
+                        // run. Best-effort; failures are logged, not fatal.
+                        if let Some(workdir) = &cfg.tool_workdir {
+                            if !transcript.is_empty() || !drained.is_empty() {
+                                match write_session_transcript(
+                                    workdir,
+                                    &channel_for_post,
+                                    &transcript,
+                                    &drained,
+                                ) {
+                                    Ok(path) => {
+                                        tracing::info!(path = %path.display(), "session transcript written");
+                                        let _ = handle
+                                            .privmsg(
+                                                &channel_for_post,
+                                                &format!("[transcript] saved to {}", path.display()),
+                                            )
+                                            .await;
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(error = ?e, "session transcript write failed");
+                                    }
+                                }
                             }
                         }
 
