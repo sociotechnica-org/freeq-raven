@@ -93,6 +93,30 @@ Raven uses:
 
 Raven joins `irc.freeq.at` and `#alexandria` by default.
 
+## Agent Avatar
+
+Raven's video tile is selected with `RAVEN_RENDER_BACKEND` in the wrapper
+scripts, or `--render-backend` when running the binary directly:
+
+- `coin` renders the animated raven coin avatar and is the default.
+- `alexandria` is accepted as a Revenant-compatible alias for `coin`.
+- `svg` renders the original cyberpunk presence orb.
+- `particles` renders the Ghostly particle face selected by
+  `--ghostly-character`.
+
+The coin backend embeds `crates/freeq-raven/assets/raven-unlit.png` and
+`crates/freeq-raven/assets/raven-lit.png`, then crossfades between them while
+reacting to audio, listening, thinking, and vision state. Replace those two
+files to customize the live avatar states. The browser preview uses
+`crates/freeq-raven/assets/raven-{idle,listening,thinking,speaking,vision}-loop.mp4`
+as richer visual loops around the same state controls.
+
+Preview it locally with real Raven voice testing:
+
+```bash
+node crates/freeq-raven/assets/coin-preview-server.mjs
+```
+
 ## Prerequisites
 
 - Rust toolchain with `cargo`
@@ -131,6 +155,8 @@ FREEQ_SERVER=wss://irc.freeq.at/irc
 FREEQ_CHANNEL=#alexandria
 RAVEN_FREEQ_NICK=Raven
 RAVEN_IDENTITY_NAME=raven
+RAVEN_RENDER_BACKEND=coin
+RAVEN_ELEVENLABS_VOICE=aj0fZfXTBc7E3By4X8L2
 RAVEN_AGENT_WORKDIR=/absolute/path/to/target-product-repo
 RAVEN_ALEXANDRIA_PLUGIN_PATH=/absolute/path/to/target-product-repo/.claude/plugins/alexandria
 ```

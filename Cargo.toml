@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/freeq-raven"]
+members = ["crates/freeq-av", "crates/freeq-raven"]
 
 [workspace.package]
 version = "0.1.0"

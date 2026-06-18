@@ -36,6 +36,8 @@ use clap::Parser;
 
 use freeq_raven::{character_profile, identity, imagegen, irc, stt};
 
+const DEFAULT_ELEVENLABS_VOICE: &str = "aj0fZfXTBc7E3By4X8L2";
+
 #[derive(Parser, Debug, Clone)]
 #[command(
     name = "freeq-raven",
@@ -135,10 +137,11 @@ struct Cli {
     #[arg(long, default_value = "meta-llama/llama-4-scout-17b-16e-instruct")]
     vision_model: String,
 
-    /// ElevenLabs voice + model for speaking answers aloud. Reads
-    /// `ELEVENLABS_API_KEY` from the environment.
-    #[arg(long, default_value = "aj0fZfXTBc7E3By4X8L2")]
-    elevenlabs_voice: String,
+    /// ElevenLabs voice override for speaking answers aloud. Reads
+    /// `ELEVENLABS_API_KEY` for auth and `RAVEN_ELEVENLABS_VOICE` for
+    /// this optional voice id.
+    #[arg(long, env = "RAVEN_ELEVENLABS_VOICE")]
+    elevenlabs_voice: Option<String>,
     #[arg(long, default_value = "eleven_turbo_v2_5")]
     elevenlabs_model: String,
 
@@ -192,10 +195,11 @@ struct Cli {
     #[arg(long)]
     no_ambient: bool,
 
-    /// Video tile renderer: `svg` (default — full freeq cyberpunk
-    /// presence with EQ strip, scene cards, ambient HUD, vision PiP) or
-    /// `particles` (ghostly particle face — face only, no overlays).
-    #[arg(long, default_value = "svg")]
+    /// Video tile renderer: `coin`/`alexandria` (default — pulsing raven
+    /// coin), `svg` (full freeq cyberpunk presence with EQ strip, scene
+    /// cards, ambient HUD, vision PiP), or `particles` (ghostly particle
+    /// face).
+    #[arg(long, default_value = "coin")]
     render_backend: String,
 
     /// Character profile used for voice + prompt. With
@@ -347,14 +351,17 @@ async fn main() -> Result<()> {
         ambient_enabled: !cli.no_ambient,
         render_backend: cli.render_backend.clone(),
         ghostly_character: cli.ghostly_character.clone(),
-        // Per-character voice + system-prompt overrides. When the
-        // character matches an entry in `character_profile`, swap in
-        // its ElevenLabs voice ID and personality. Without a match
-        // we fall through to the CLI's `--elevenlabs-voice` and the
-        // default Raven prompt.
-        elevenlabs_voice_id: character_profile::by_name(&cli.ghostly_character)
-            .map(|p| p.voice_id.to_string())
-            .unwrap_or(cli.elevenlabs_voice),
+        // Per-character voice + system-prompt defaults. An explicit
+        // `--elevenlabs-voice` / `RAVEN_ELEVENLABS_VOICE` wins; without
+        // one, the active profile supplies the voice. Unknown profiles
+        // fall back to the Alexandria/Raven voice.
+        elevenlabs_voice_id: cli
+            .elevenlabs_voice
+            .clone()
+            .or_else(|| {
+                character_profile::by_name(&cli.ghostly_character).map(|p| p.voice_id.to_string())
+            })
+            .unwrap_or_else(|| DEFAULT_ELEVENLABS_VOICE.to_string()),
         character_system_prompt: character_profile::by_name(&cli.ghostly_character)
             .map(|p| p.system_prompt.to_string()),
         peer_agents: cli.peer_agents,
