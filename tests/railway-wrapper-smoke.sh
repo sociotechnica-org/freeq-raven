@@ -130,7 +130,9 @@ assert_contains "init all --workspace .alexandria-next/railway-workspace --acp-p
 assert_contains "inspect subscriptions register --subscription host:claude-code:freeq-raven:alexandria-wedo:frame-the-problem --connection host:claude-code:freeq-raven:alexandria-wedo --host claude-code --if-missing --json --type play.human_input_requested --type play.human_input_resolved --type play.completed --type play.failed" "$TMP_ROOT/ax.calls"
 assert_contains "internal host freeq-raven heartbeat --connection host:freeq-raven:alexandria-wedo --follow --poll-interval-ms 1000" "$TMP_ROOT/ax.calls"
 assert_contains "host:claude-code:freeq-raven:alexandria-wedo" "$TMP_ROOT/raven.claude-connection"
-assert_contains "internal host claude monitor --connection host:claude-code:freeq-raven:alexandria-wedo --cursor host:claude-code:freeq-raven:alexandria-wedo --follow --json-lines --poll-interval-ms 1000" "$TMP_ROOT/raven.wake-command"
+assert_contains "while true; do" "$TMP_ROOT/raven.wake-command"
+assert_contains "internal host claude monitor --connection host:claude-code:freeq-raven:alexandria-wedo --cursor host:claude-code:freeq-raven:alexandria-wedo --once --json-lines" "$TMP_ROOT/raven.wake-command"
+assert_contains "sleep 1; done" "$TMP_ROOT/raven.wake-command"
 assert_contains '"workspace":".alexandria-next/railway-workspace"' "$TMP_ROOT/data/projects/alexandria-wedo/.alexandria-next/alexandria-config.json"
 
 workspace_link="$TMP_ROOT/data/projects/alexandria-wedo/.alexandria-next/railway-workspace"
