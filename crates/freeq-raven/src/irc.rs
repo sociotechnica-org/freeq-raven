@@ -1131,6 +1131,7 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
                     )
                     .await
                     {
+                        send_typing_stop(&handle_arc, &target).await;
                         continue;
                     }
                 }
