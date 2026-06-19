@@ -195,7 +195,8 @@ done
 
 if [[ -z "${RAVEN_ALEXANDRIA_WAKE_COMMAND:-}" ]]; then
 	printf -v RAVEN_ALEXANDRIA_WAKE_COMMAND \
-		'while true; do %q internal host claude monitor --connection %q --cursor %q --once --json-lines || true; sleep %q; done' \
+		'cd %q && while true; do %q internal host claude monitor --connection %q --cursor %q --once --json-lines || true; sleep %q; done' \
+		"$ALEXANDRIA_PROJECT_DIR" \
 		"$AX2_BIN" \
 		"$ALEXANDRIA_CLAUDE_CONNECTION_ID" \
 		"$ALEXANDRIA_CLAUDE_CONNECTION_ID" \
