@@ -1403,6 +1403,13 @@ sharpen the thread. Do NOT address yourself."
                 if !answer.plugins.is_empty() {
                     tracing::info!(plugins = ?answer.plugins, "claude agent plugins loaded");
                 }
+                if !answer.skills.is_empty() {
+                    tracing::info!(
+                        count = answer.skills.len(),
+                        skills = ?answer.skills,
+                        "claude agent skills loaded"
+                    );
+                }
                 for sentence in chunker.push(&answer.text) {
                     let _ = tx.send(sentence);
                 }
@@ -1628,7 +1635,7 @@ sharpen the thread. Do NOT address yourself."
 
     if !spoke {
         tracing::info!("answered in text only");
-        let _ = handle.privmsg(&channel, &answer.text).await;
+        post_long(&handle, &channel, &answer.text).await;
     }
 
     // Whiteboard takes priority — if she's explaining something, draw
@@ -2765,18 +2772,73 @@ fn active_session_id_from_json(active: &serde_json::Value) -> Option<String> {
         .map(str::to_string)
 }
 
+const CHAT_POST_MAX_CHARS: usize = 360;
+const CHAT_POST_PACE: Duration = Duration::from_millis(450);
+
 /// PRIVMSG has a length cap (~400-500 chars depending on prefix length).
-/// Split long messages on newlines and post chunks; the summary is
-/// usually 2-4 short paragraphs, well under the limit per line.
+/// Split long messages on newlines and post chunks so chat-only answers
+/// do not depend on IRCv3 multiline rendering support in every client.
 async fn post_long(handle: &ClientHandle, channel: &str, text: &str) {
-    for line in text.lines() {
-        if line.is_empty() {
+    for chunk in chat_post_chunks(text) {
+        if let Err(error) = handle.privmsg(channel, &chunk).await {
+            tracing::warn!(
+                channel,
+                error = ?error,
+                chars = chunk.chars().count(),
+                "failed to post chat chunk"
+            );
+            break;
+        }
+        // The server permits 5 PRIVMSGs per 2s per session. Stay below
+        // that window when posting a long text-only answer.
+        tokio::time::sleep(CHAT_POST_PACE).await;
+    }
+}
+
+fn chat_post_chunks(text: &str) -> Vec<String> {
+    let mut chunks = Vec::new();
+    for line in text.lines().map(str::trim_end) {
+        if line.trim().is_empty() {
             continue;
         }
-        let _ = handle.privmsg(channel, line).await;
-        // Brief pacing so we don't flood-trip the server.
-        tokio::time::sleep(Duration::from_millis(150)).await;
+        split_chat_line(line, CHAT_POST_MAX_CHARS, &mut chunks);
     }
+    chunks
+}
+
+fn split_chat_line(line: &str, max_chars: usize, chunks: &mut Vec<String>) {
+    let mut rest = line.trim_start();
+    while rest.chars().count() > max_chars {
+        let split_at = split_index(rest, max_chars);
+        let (head, tail) = rest.split_at(split_at);
+        let head = head.trim_end();
+        if !head.is_empty() {
+            chunks.push(head.to_string());
+        }
+        rest = tail.trim_start();
+    }
+    if !rest.is_empty() {
+        chunks.push(rest.to_string());
+    }
+}
+
+fn split_index(s: &str, max_chars: usize) -> usize {
+    let mut char_count = 0usize;
+    let mut fallback = s.len();
+    let mut last_space = None;
+    for (idx, ch) in s.char_indices() {
+        if char_count == max_chars {
+            fallback = idx;
+            break;
+        }
+        if ch.is_whitespace() {
+            last_space = Some(idx);
+        }
+        char_count += 1;
+    }
+    last_space
+        .filter(|idx| *idx > max_chars / 2)
+        .unwrap_or(fallback)
 }
 
 async fn send_typing_start(handle: &ClientHandle, channel: &str) {
@@ -2813,6 +2875,25 @@ mod tests {
     use tokio::sync::mpsc;
 
     // ---------- sfu_url_from_server ----------
+
+    #[test]
+    fn chat_post_chunks_splits_multiline_answers() {
+        let chunks = chat_post_chunks("Posting now.\n\n- Alpha\n- Beta\n");
+        assert_eq!(chunks, vec!["Posting now.", "- Alpha", "- Beta"]);
+    }
+
+    #[test]
+    fn chat_post_chunks_wraps_long_lines() {
+        let text = "word ".repeat(120);
+        let chunks = chat_post_chunks(&text);
+        assert!(chunks.len() > 1, "expected long text to wrap");
+        assert!(
+            chunks
+                .iter()
+                .all(|chunk| chunk.chars().count() <= CHAT_POST_MAX_CHARS)
+        );
+        assert_eq!(chunks.join(" "), text.trim());
+    }
 
     #[test]
     fn sfu_wss_irc_to_https_avmoq() {

@@ -248,6 +248,10 @@ The sidecar loads the local Claude plugin from
 `$RAVEN_AGENT_WORKDIR/.claude/plugins/alexandria` by default and exposes all
 plugin skills to the Claude Agent SDK session.
 
+The sidecar emits concise `claude_agent.*` trace events to stderr by default so
+Railway logs show SDK init, assistant/tool, and result progress for each turn.
+Set `RAVEN_AGENT_TRACE=0` to disable those progress logs.
+
 ## Systemd Deployment
 
 For a Linux box, copy `ops/systemd/freeq-raven.service` into the user service
