@@ -2,14 +2,14 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: freeq-raven-store-key ANTHROPIC_API_KEY|ELEVENLABS_API_KEY|DEEPGRAM_API_KEY|GROQ_API_KEY|INCEPTION_API_KEY" >&2
+  echo "usage: freeq-raven-store-key ANTHROPIC_API_KEY|ELEVENLABS_API_KEY|DEEPGRAM_API_KEY|GROQ_API_KEY|INCEPTION_API_KEY|RAVEN_BSKY_APP_PASSWORD" >&2
   exit 2
 }
 
 [[ $# -eq 1 ]] || usage
 
 case "$1" in
-  ANTHROPIC_API_KEY | ELEVENLABS_API_KEY | DEEPGRAM_API_KEY | GROQ_API_KEY | INCEPTION_API_KEY) key_name="$1" ;;
+  ANTHROPIC_API_KEY | ELEVENLABS_API_KEY | DEEPGRAM_API_KEY | GROQ_API_KEY | INCEPTION_API_KEY | RAVEN_BSKY_APP_PASSWORD) key_name="$1" ;;
   *) usage ;;
 esac
 
@@ -24,8 +24,13 @@ else
   IFS= read -r value
 fi
 
-if [[ ${#value} -lt 20 ]]; then
-  echo "Input does not look like an API key." >&2
+min_len=20
+if [[ "$key_name" == "RAVEN_BSKY_APP_PASSWORD" ]]; then
+  min_len=12
+fi
+
+if [[ ${#value} -lt $min_len ]]; then
+  echo "Input does not look like a valid value for $key_name." >&2
   exit 2
 fi
 

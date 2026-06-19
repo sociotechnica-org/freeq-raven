@@ -3,10 +3,11 @@
 //! shared per-channel LLM session.
 //!
 //! Lifecycle:
-//! 1. Load (or auto-create) a did:key identity at
-//!    `~/.freeq/bots/<name>/key.ed25519`.
+//! 1. Resolve the configured Freeq auth identity. Raven defaults to her
+//!    Bluesky-backed DID when the wrapper sets `RAVEN_FREEQ_AUTH=bluesky`;
+//!    local/dev characters can still use auto-created `did:key` identities.
 //! 2. Connect to a freeq IRC server with SASL ATPROTO-CHALLENGE using
-//!    that key.
+//!    that identity.
 //! 3. Join the configured channels and watch for
 //!    `+freeq.at/av-state=started` TAGMSGs.
 //! 4. On a session start, send `av-join`, open a MoQ subscriber via the
@@ -35,8 +36,14 @@ use anyhow::{Context, Result};
 use clap::Parser;
 
 use freeq_raven::{character_profile, identity, imagegen, irc, stt};
+use freeq_sdk::auth::PdsSessionSigner;
+use freeq_sdk::did::DidResolver;
+use freeq_sdk::pds;
 
-#[derive(Parser, Debug, Clone)]
+const RAVEN_BSKY_HANDLE: &str = "raven-alexandria.bsky.social";
+const RAVEN_BSKY_DID: &str = "did:plc:5cyzpborqchuckjhxciekbll";
+
+#[derive(Parser, Clone)]
 #[command(
     name = "freeq-raven",
     about = "Joins freeq AV sessions, transcribes audio, posts the transcript + summary back to the channel."
@@ -60,6 +67,31 @@ struct Cli {
     /// IRC nick. Defaults to the identity name.
     #[arg(long)]
     nick: Option<String>,
+
+    /// Freeq auth mode: `did-key` uses the local bot key, `bluesky`
+    /// authenticates through the configured Bluesky account.
+    #[arg(long, env = "RAVEN_FREEQ_AUTH", default_value = "did-key")]
+    freeq_auth: String,
+
+    /// Bluesky handle to use when `--freeq-auth bluesky` is selected.
+    #[arg(long, env = "RAVEN_BSKY_HANDLE", default_value = RAVEN_BSKY_HANDLE)]
+    bsky_handle: String,
+
+    /// Expected Bluesky DID. Startup fails if the PDS session resolves
+    /// to a different DID, which prevents accidental wrong-account auth.
+    #[arg(long, env = "RAVEN_BSKY_DID", default_value = RAVEN_BSKY_DID)]
+    bsky_did: String,
+
+    /// Bluesky app password for the configured handle. Prefer setting
+    /// `RAVEN_BSKY_APP_PASSWORD` in `.env`; the wrapper does not put
+    /// this secret on the command line.
+    #[arg(
+        long,
+        env = "RAVEN_BSKY_APP_PASSWORD",
+        hide_env_values = true,
+        value_name = "APP_PASSWORD"
+    )]
+    bsky_app_password: Option<String>,
 
     /// Path to a ggml whisper.cpp model — used only by the local STT
     /// backend (the `stt` cargo feature). Ignored when `GROQ_API_KEY`
@@ -272,9 +304,7 @@ async fn main() -> Result<()> {
     // identity advertises itself as `oblivion` on the channel.
     let nick = cli.nick.clone().unwrap_or_else(|| identity_name.clone());
 
-    // Load or create the bot's did:key identity.
-    let ident = identity::load_or_create(&identity_name).context("loading bot identity")?;
-    tracing::info!(did = %ident.did, "bot identity ready");
+    let auth = build_freeq_auth(&cli, &identity_name).await?;
 
     // Pick the STT backend. Priority: Deepgram when DEEPGRAM_API_KEY
     // is set; then Groq when GROQ_API_KEY is set; then local
@@ -374,7 +404,7 @@ async fn main() -> Result<()> {
         server: cli.server,
         channels: cli.channel,
         nick,
-        ident,
+        auth,
         stt,
         window_secs: cli.window_secs,
         summary_model: cli.summary_model,
@@ -419,6 +449,59 @@ async fn main() -> Result<()> {
         peer_agents: cli.peer_agents,
     })
     .await
+}
+
+async fn build_freeq_auth(cli: &Cli, identity_name: &str) -> Result<irc::AuthIdentity> {
+    match cli.freeq_auth.trim().to_ascii_lowercase().as_str() {
+        "did-key" | "didkey" | "key" | "local" => {
+            let ident = identity::load_or_create(identity_name).context("loading bot identity")?;
+            tracing::info!(did = %ident.did, "bot did:key identity ready");
+            Ok(irc::AuthIdentity::DidKey(ident))
+        }
+        "bluesky" | "bsky" | "pds" => {
+            let app_password = cli
+                .bsky_app_password
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .context(
+                    "RAVEN_FREEQ_AUTH=bluesky requires RAVEN_BSKY_APP_PASSWORD \
+                     for raven-alexandria.bsky.social",
+                )?;
+            let resolver = DidResolver::http();
+            let (session, pds_url) = pds::create_session(&cli.bsky_handle, app_password, &resolver)
+                .await
+                .with_context(|| format!("authenticating Bluesky handle {}", cli.bsky_handle))?;
+            if session.did != cli.bsky_did {
+                anyhow::bail!(
+                    "Bluesky DID mismatch for {}: expected {}, got {}",
+                    cli.bsky_handle,
+                    cli.bsky_did,
+                    session.did
+                );
+            }
+            tracing::info!(
+                handle = %session.handle,
+                did = %session.did,
+                pds = %pds_url,
+                "bot Bluesky identity ready"
+            );
+            let did = session.did.clone();
+            let signer = PdsSessionSigner::new_with_refresh(
+                session.did,
+                session.access_jwt,
+                session.refresh_jwt,
+                pds_url,
+            );
+            Ok(irc::AuthIdentity::Signer {
+                did,
+                signer: Arc::new(signer),
+            })
+        }
+        other => anyhow::bail!(
+            "unsupported RAVEN_FREEQ_AUTH value {other:?}; expected did-key or bluesky"
+        ),
+    }
 }
 
 fn env_flag(name: &str) -> bool {

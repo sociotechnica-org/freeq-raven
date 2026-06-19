@@ -155,6 +155,9 @@ FREEQ_SERVER=wss://irc.freeq.at/irc
 FREEQ_CHANNEL=#alexandria
 RAVEN_FREEQ_NICK=Raven
 RAVEN_IDENTITY_NAME=raven
+RAVEN_FREEQ_AUTH=bluesky
+RAVEN_BSKY_HANDLE=raven-alexandria.bsky.social
+RAVEN_BSKY_DID=did:plc:5cyzpborqchuckjhxciekbll
 RAVEN_RENDER_BACKEND=coin
 RAVEN_ELEVENLABS_VOICE=aj0fZfXTBc7E3By4X8L2
 RAVEN_AGENT_WORKDIR=/absolute/path/to/target-product-repo
@@ -162,6 +165,11 @@ RAVEN_ALEXANDRIA_PLUGIN_PATH=/absolute/path/to/target-product-repo/.claude/plugi
 ```
 
 Never commit `.env`. It contains live provider keys.
+
+`RAVEN_FREEQ_AUTH=bluesky` makes Raven authenticate to Freeq as the
+Bluesky-backed DID above. Store the account app password locally as
+`RAVEN_BSKY_APP_PASSWORD`; use `RAVEN_FREEQ_AUTH=did-key` only for local
+throwaway identities.
 
 ## Local Run Loop
 

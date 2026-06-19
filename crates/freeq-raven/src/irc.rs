@@ -19,7 +19,7 @@ use freeq_agent_kit::{
     VadConfig, VadSegmenter, extract_addressed, is_hallucination, split_speech_and_links,
 };
 use freeq_av::{AvConfig, AvParticipant, AvSession, Speaker, VideoHandle, broadcast_path};
-use freeq_sdk::auth::KeySigner;
+use freeq_sdk::auth::{ChallengeSigner, KeySigner};
 use freeq_sdk::client::{self, ClientHandle, ConnectConfig};
 use freeq_sdk::event::Event;
 use tokio::sync::Mutex as AsyncMutex;
@@ -323,7 +323,7 @@ pub struct RunConfig {
     pub server: String,
     pub channels: Vec<String>,
     pub nick: String,
-    pub ident: Identity,
+    pub auth: AuthIdentity,
     pub stt: Arc<SttEngine>,
     pub window_secs: f32,
     pub summary_model: String,
@@ -400,6 +400,31 @@ pub struct RunConfig {
     /// without a human break, the bot stops responding until a human
     /// addresses it again.
     pub peer_agents: Vec<String>,
+}
+
+pub enum AuthIdentity {
+    DidKey(Identity),
+    Signer {
+        did: String,
+        signer: Arc<dyn ChallengeSigner>,
+    },
+}
+
+impl AuthIdentity {
+    pub fn did(&self) -> &str {
+        match self {
+            Self::DidKey(Identity { did, .. }) | Self::Signer { did, .. } => did,
+        }
+    }
+
+    fn into_signer(self) -> Arc<dyn ChallengeSigner> {
+        match self {
+            Self::DidKey(Identity { did, private_key }) => {
+                Arc::new(KeySigner::new(did, private_key))
+            }
+            Self::Signer { signer, .. } => signer,
+        }
+    }
 }
 
 /// Subset of [`RunConfig`] shared with inner tasks. Excludes the
@@ -549,12 +574,12 @@ impl Drop for ActiveCall {
 pub async fn run(cfg: RunConfig) -> Result<()> {
     // Destructure up front so we own the individual fields; the cfg
     // we hand to the inner tasks (wrapped in Arc) is rebuilt below
-    // without the moved-out PrivateKey.
+    // without the moved-out auth signer.
     let RunConfig {
         server,
         channels,
         nick,
-        ident: Identity { did, private_key },
+        auth,
         stt,
         window_secs,
         summary_model,
@@ -617,7 +642,8 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
         websocket_url,
     };
 
-    let signer = Arc::new(KeySigner::new(did, private_key));
+    tracing::info!(did = %auth.did(), "freeq auth identity ready");
+    let signer = auth.into_signer();
     let (handle, mut events) = client::connect(conn_config, Some(signer));
 
     // Wait for registration.

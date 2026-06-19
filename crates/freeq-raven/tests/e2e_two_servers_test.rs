@@ -21,7 +21,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use freeq_raven::claude_agent::ClaudeAgentConfig;
-use freeq_raven::irc::{RunConfig, run};
+use freeq_raven::irc::{AuthIdentity, RunConfig, run};
 use freeq_raven::stt::SttEngine;
 use freeq_sdk::client::{self, ClientHandle, ConnectConfig};
 use freeq_sdk::event::Event;
@@ -282,7 +282,7 @@ fn spawn_bot_with_claude_agent(
         server: server.to_string(),
         channels,
         nick: bot_name.to_string(),
-        ident,
+        auth: AuthIdentity::DidKey(ident),
         // stt feature is off → Whisper::load is a no-op that accepts any
         // path and `transcribe` always returns "". We never reach the
         // audio path in these tests anyway.
@@ -304,6 +304,7 @@ fn spawn_bot_with_claude_agent(
         groq_answer_model: "groq/compound".to_string(),
         inception_api_key: None,
         inception_reasoning_effort: "instant".to_string(),
+        alexandria: None,
         claude_agent,
         vision_model: "meta-llama/llama-4-scout-17b-16e-instruct".to_string(),
         elevenlabs_api_key: None,

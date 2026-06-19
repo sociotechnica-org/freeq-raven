@@ -34,9 +34,9 @@ const SPEAKING_MP4: &[u8] = include_bytes!("../assets/raven-speaking-loop.mp4");
 const VISION_MP4: &[u8] = include_bytes!("../assets/raven-vision-loop.mp4");
 
 const COIN_HEIGHT: u32 = 420;
-const COIN_CROP_X: u32 = 42;
-const COIN_CROP_Y: u32 = 58;
-const COIN_CROP_SIZE: u32 = 882;
+const COIN_CROP_X_FRAC: f32 = 42.0 / 974.0;
+const COIN_CROP_Y_FRAC: f32 = 58.0 / 1024.0;
+const COIN_CROP_SIZE_FRAC: f32 = 882.0 / 974.0;
 const LIT_BYTES: &[u8] = include_bytes!("../assets/raven-lit.png");
 const UNLIT_BYTES: &[u8] = include_bytes!("../assets/raven-unlit.png");
 
@@ -472,9 +472,12 @@ fn coin_lighting(state: CoinState, level: f32, peer: f32) -> CoinLighting {
 fn prepare_coin(bytes: &[u8]) -> Option<CoinImage> {
     let img = image::load_from_memory(bytes).ok()?;
     let (src_w, src_h) = img.dimensions();
-    let crop_x = COIN_CROP_X.min(src_w.saturating_sub(1));
-    let crop_y = COIN_CROP_Y.min(src_h.saturating_sub(1));
-    let crop_size = COIN_CROP_SIZE
+    let crop_x = ((src_w as f32) * COIN_CROP_X_FRAC).round() as u32;
+    let crop_y = ((src_h as f32) * COIN_CROP_Y_FRAC).round() as u32;
+    let crop_size = ((src_w as f32) * COIN_CROP_SIZE_FRAC).round() as u32;
+    let crop_x = crop_x.min(src_w.saturating_sub(1));
+    let crop_y = crop_y.min(src_h.saturating_sub(1));
+    let crop_size = crop_size
         .min(src_w.saturating_sub(crop_x))
         .min(src_h.saturating_sub(crop_y));
     let img = img.crop_imm(crop_x, crop_y, crop_size, crop_size);

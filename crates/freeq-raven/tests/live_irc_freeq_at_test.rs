@@ -10,7 +10,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
 use freeq_raven::claude_agent::ClaudeAgentConfig;
-use freeq_raven::irc::{RunConfig, run};
+use freeq_raven::irc::{AuthIdentity, RunConfig, run};
 use freeq_raven::stt::SttEngine;
 use freeq_sdk::client::{self, ClientHandle, ConnectConfig};
 use freeq_sdk::event::Event;
@@ -131,7 +131,7 @@ fn spawn_live_bot(
         server: server.to_string(),
         channels: vec![channel.to_string()],
         nick: bot_name.to_string(),
-        ident,
+        auth: AuthIdentity::DidKey(ident),
         stt: Arc::new(SttEngine::noop()),
         window_secs: 10.0,
         summary_model: "claude-sonnet-4-5".to_string(),
@@ -145,6 +145,7 @@ fn spawn_live_bot(
         groq_answer_model: "groq/compound".to_string(),
         inception_api_key: None,
         inception_reasoning_effort: "instant".to_string(),
+        alexandria: None,
         claude_agent: Some(claude_agent),
         vision_model: "meta-llama/llama-4-scout-17b-16e-instruct".to_string(),
         elevenlabs_api_key: None,
