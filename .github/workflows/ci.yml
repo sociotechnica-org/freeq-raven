@@ -15,6 +15,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
 
 jobs:
   rust:
@@ -48,8 +49,11 @@ jobs:
       - name: Check Rust formatting
         run: cargo fmt --all -- --check
 
+      - name: Build Rust tests
+        run: cargo test -p freeq-raven --lib --test identity_test --locked --no-run
+
       - name: Run clippy
-        run: cargo clippy --workspace --all-targets --locked
+        run: cargo clippy --workspace --all-targets --locked --profile test --no-deps
 
       - name: Run Rust tests
         run: make test

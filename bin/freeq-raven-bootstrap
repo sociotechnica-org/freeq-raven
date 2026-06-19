@@ -16,8 +16,7 @@ cd "$ROOT"
 
 if [[ "$CHECK_ONLY" == "1" ]]; then
   cargo check -p freeq-raven
-  cargo test -p freeq-raven --lib
-  cargo test -p freeq-raven identity --test identity_test
+  cargo test -p freeq-raven --lib --test identity_test
   exit 0
 fi
 
