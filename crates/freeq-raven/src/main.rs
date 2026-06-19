@@ -150,27 +150,6 @@ struct Cli {
     #[arg(long, env = "RAVEN_ALEXANDRIA_PLUGIN_PATH")]
     alexandria_plugin_path: Option<PathBuf>,
 
-    /// Watch Alexandria play wakes and relay Frame the Problem feedback
-    /// gates into the Freeq room.
-    #[arg(long)]
-    alexandria_monitor: bool,
-
-    /// AX command used by the Alexandria room-bot monitor.
-    #[arg(long, env = "RAVEN_ALEXANDRIA_MONITOR_COMMAND")]
-    alexandria_monitor_command: Option<String>,
-
-    /// Alexandria room-bot connection id.
-    #[arg(long, env = "RAVEN_ALEXANDRIA_MONITOR_CONNECTION")]
-    alexandria_monitor_connection: Option<String>,
-
-    /// Poll interval for `ax internal host freeq-raven monitor`.
-    #[arg(
-        long,
-        env = "RAVEN_ALEXANDRIA_MONITOR_POLL_INTERVAL_MS",
-        default_value_t = 1000
-    )]
-    alexandria_monitor_poll_interval_ms: u64,
-
     /// Permission mode for the Claude Agent SDK sidecar.
     #[arg(long, env = "RAVEN_AGENT_PERMISSION_MODE", default_value = "dontAsk")]
     agent_permission_mode: String,
@@ -373,33 +352,6 @@ async fn main() -> Result<()> {
     // The active character profile supplies voice + system-prompt defaults;
     // looked up once and reused for both below.
     let profile = character_profile::by_name(&cli.ghostly_character);
-    let alexandria_monitor_enabled = cli.alexandria_monitor || env_flag("RAVEN_ALEXANDRIA_MONITOR");
-    let alexandria = if alexandria_monitor_enabled {
-        let workdir = cli
-            .agent_workdir
-            .clone()
-            .unwrap_or(std::env::current_dir()?);
-        let ax_bin = cli
-            .alexandria_monitor_command
-            .clone()
-            .or_else(|| non_empty_env("AX_BIN"))
-            .or_else(|| non_empty_env("AX2_BIN"))
-            .unwrap_or_else(|| "ax".to_string());
-        let connection_id = cli
-            .alexandria_monitor_connection
-            .clone()
-            .or_else(|| non_empty_env("ALEXANDRIA_FREEQ_RAVEN_CONNECTION_ID"))
-            .unwrap_or_else(|| format!("host:freeq-raven:{identity_name}"));
-        Some(freeq_raven::alexandria::AlexandriaConfig {
-            ax_bin,
-            connection_id,
-            poll_interval_ms: cli.alexandria_monitor_poll_interval_ms,
-            workdir,
-        })
-    } else {
-        None
-    };
-
     irc::run(irc::RunConfig {
         server: cli.server,
         channels: cli.channel,
@@ -418,7 +370,6 @@ async fn main() -> Result<()> {
         groq_answer_model: cli.groq_answer_model,
         inception_api_key,
         inception_reasoning_effort: cli.inception_reasoning_effort,
-        alexandria,
         claude_agent: agent_command.map(|command| freeq_raven::claude_agent::ClaudeAgentConfig {
             command,
             workdir: cli.agent_workdir,
@@ -502,24 +453,6 @@ async fn build_freeq_auth(cli: &Cli, identity_name: &str) -> Result<irc::AuthIde
             "unsupported RAVEN_FREEQ_AUTH value {other:?}; expected did-key or bluesky"
         ),
     }
-}
-
-fn env_flag(name: &str) -> bool {
-    std::env::var(name)
-        .ok()
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
-        .unwrap_or(false)
-}
-
-fn non_empty_env(name: &str) -> Option<String> {
-    std::env::var(name)
-        .ok()
-        .filter(|value| !value.trim().is_empty())
 }
 
 /// Choose the STT backend. Deepgram wins when `DEEPGRAM_API_KEY` is

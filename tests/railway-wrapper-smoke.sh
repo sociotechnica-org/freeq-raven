@@ -3,7 +3,6 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP_ROOT="${TMPDIR:-/tmp}/freeq-raven-railway-smoke.$$"
-export TMP_ROOT
 
 cleanup() {
 	rm -rf "$TMP_ROOT"
@@ -41,12 +40,6 @@ cp "$ROOT/bin/freeq-raven-railway" "$TMP_ROOT/host/bin/freeq-raven-railway"
 cat >"$TMP_ROOT/host/bin/freeq-raven" <<SH
 #!/bin/sh
 printf started > "$TMP_ROOT/raven.started"
-{
-  printf 'RAVEN_ALEXANDRIA_MONITOR=%s\n' "\${RAVEN_ALEXANDRIA_MONITOR:-}"
-  printf 'RAVEN_ALEXANDRIA_MONITOR_COMMAND=%s\n' "\${RAVEN_ALEXANDRIA_MONITOR_COMMAND:-}"
-  printf 'RAVEN_ALEXANDRIA_MONITOR_CONNECTION=%s\n' "\${RAVEN_ALEXANDRIA_MONITOR_CONNECTION:-}"
-  printf 'RAVEN_ALEXANDRIA_MONITOR_POLL_INTERVAL_MS=%s\n' "\${RAVEN_ALEXANDRIA_MONITOR_POLL_INTERVAL_MS:-}"
-} >"${TMP_ROOT:?}/raven.env.seen"
 sleep 0.2
 SH
 chmod +x "$TMP_ROOT/host/bin/freeq-raven"
@@ -133,10 +126,6 @@ assert_contains "https://getalexandria.ai/install.sh" "$TMP_ROOT/curl.args"
 assert_not_contains "install-next.sh" "$TMP_ROOT/curl.args"
 assert_contains "init all --workspace .alexandria-next/railway-workspace --acp-provider claude" "$TMP_ROOT/ax.calls"
 assert_contains "internal host freeq-raven heartbeat --connection host:freeq-raven:alexandria-wedo --follow --poll-interval-ms 1000" "$TMP_ROOT/ax.calls"
-assert_contains "RAVEN_ALEXANDRIA_MONITOR=1" "$TMP_ROOT/raven.env.seen"
-assert_contains "RAVEN_ALEXANDRIA_MONITOR_COMMAND=$TMP_ROOT/axbin/ax" "$TMP_ROOT/raven.env.seen"
-assert_contains "RAVEN_ALEXANDRIA_MONITOR_CONNECTION=host:freeq-raven:alexandria-wedo" "$TMP_ROOT/raven.env.seen"
-assert_contains "RAVEN_ALEXANDRIA_MONITOR_POLL_INTERVAL_MS=1000" "$TMP_ROOT/raven.env.seen"
 assert_contains '"workspace":".alexandria-next/railway-workspace"' "$TMP_ROOT/data/projects/alexandria-wedo/.alexandria-next/alexandria-config.json"
 
 workspace_link="$TMP_ROOT/data/projects/alexandria-wedo/.alexandria-next/railway-workspace"
