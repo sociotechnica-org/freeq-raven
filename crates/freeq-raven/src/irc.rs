@@ -376,10 +376,10 @@ async fn handle_alexandria_wake_line(
     );
     let question = format!(
         "Alexandria plugin wake for this Freeq room:\n{wake}\n\n\
-Handle this as Raven in the room. Use the installed Alexandria skills and \
-AX commands when appropriate. If this needs the director's reaction, read \
-the relevant context, ask conversationally in the room, and stop. If this \
-reports completion or failure, tell the room what happened."
+Handle this as Raven in the room. Read the wake event JSON directly. \
+Usually do not use tools for this wake turn. If it needs the director's \
+reaction, ask conversationally in the room and stop. If it reports \
+completion or failure, tell the room what happened."
     );
     send_typing_start(&handle, channel).await;
     let transcript = session_context_tail(&cfg, channel, SESSION_CONTEXT_QA_TAIL_LINES);
@@ -1288,8 +1288,13 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
                         format!(
                             "Room reply after an Alexandria wake from {from}: {text}\n\n\
 Treat this as the director's response to your last wake-driven room ask \
-if it clearly answers it. Use the installed Alexandria skill guidance and \
-AX commands when appropriate. Do not require exact phrases."
+if it clearly answers it. Use the `fabroRunId` and `questionId` from the \
+last wake in the session context. If this is clear approval and the wake \
+choices included `A`, call `ax raven answer --run <fabroRunId> --question \
+<questionId> --select A`; otherwise call `ax raven answer --run \
+<fabroRunId> --question <questionId> --text <reply>`. Do not require \
+exact phrases. After the command succeeds, briefly tell the room you sent \
+it back to the play."
                         )
                     })
                 }) else {
