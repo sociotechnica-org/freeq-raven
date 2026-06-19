@@ -5,18 +5,19 @@
 //!   cargo test -p freeq-raven --test live_irc_freeq_at_test \
 //!     live_irc_freeq_at_addressed_chat_uses_claude_agent_session -- --ignored --nocapture
 
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
 use freeq_raven::claude_agent::ClaudeAgentConfig;
-use freeq_raven::identity::{self, Identity};
 use freeq_raven::irc::{RunConfig, run};
 use freeq_raven::stt::SttEngine;
 use freeq_sdk::client::{self, ClientHandle, ConnectConfig};
 use freeq_sdk::event::Event;
 use tokio::sync::mpsc::Receiver;
+
+mod common;
+use common::{mint_identity, mock_claude_agent_config};
 
 const LIVE_SERVER: &str = "wss://irc.freeq.at/irc";
 const LIVE_CHANNEL: &str = "#alexandria-test";
@@ -114,46 +115,6 @@ fn connect_target(server: &str) -> Result<(String, Option<String>, bool)> {
     } else {
         Ok((server.to_string(), None, false))
     }
-}
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(|p| p.parent())
-        .expect("crate lives under repo/crates/freeq-raven")
-        .to_path_buf()
-}
-
-fn shell_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "'\\''"))
-}
-
-fn mock_claude_agent_config(state_path: &Path) -> ClaudeAgentConfig {
-    let root = repo_root();
-    ClaudeAgentConfig {
-        command: format!(
-            "RAVEN_CLAUDE_AGENT_MOCK=1 RAVEN_CLAUDE_AGENT_MOCK_STATE={} node {}",
-            shell_quote(&state_path.display().to_string()),
-            shell_quote(
-                &root
-                    .join("scripts/claude-agent-sidecar.mjs")
-                    .display()
-                    .to_string()
-            )
-        ),
-        workdir: Some(root.clone()),
-        alexandria_plugin_path: Some(root.join(".claude/plugins/alexandria")),
-        model: None,
-        permission_mode: "dontAsk".to_string(),
-        max_turns: 4,
-        timeout: Duration::from_secs(30),
-    }
-}
-
-fn mint_identity(name: &str) -> (Identity, tempfile::TempDir) {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let ident = identity::load_or_create_in(name, tmp.path()).expect("mint identity");
-    (ident, tmp)
 }
 
 fn spawn_live_bot(

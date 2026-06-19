@@ -17,17 +17,18 @@
 //! path here.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use freeq_raven::claude_agent::ClaudeAgentConfig;
-use freeq_raven::identity::{self, Identity};
 use freeq_raven::irc::{RunConfig, run};
 use freeq_raven::stt::SttEngine;
 use freeq_sdk::client::{self, ClientHandle, ConnectConfig};
 use freeq_sdk::event::Event;
 use tokio::sync::mpsc::Receiver;
+
+mod common;
+use common::{mint_identity, mock_claude_agent_config};
 
 // ───────────────────────────── server bootstrap ─────────────────────────────
 
@@ -151,15 +152,6 @@ fn spawn_server(name: &str) -> TestServer {
 
 /// Generous CI-friendly ceiling for "the bot should have done X by now".
 const SETTLE: Duration = Duration::from_secs(20);
-
-/// Build a throwaway `did:key` identity for the bot, rooted in a tempdir
-/// so we never touch `$HOME/.freeq`. Returns the identity plus the
-/// tempdir guard (kept alive by the caller for the test's lifetime).
-fn mint_identity(name: &str) -> (Identity, tempfile::TempDir) {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let ident = identity::load_or_create_in(name, tmp.path()).expect("mint identity");
-    (ident, tmp)
-}
 
 /// A guest (non-SASL) SDK client used to observe what the bot puts on
 /// the wire. `signer: None` → the server lets it in as a guest.
@@ -327,40 +319,6 @@ fn spawn_bot_with_claude_agent(
     };
     let handle = tokio::spawn(run(cfg));
     (handle, tmp)
-}
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(|p| p.parent())
-        .expect("crate lives under repo/crates/freeq-raven")
-        .to_path_buf()
-}
-
-fn shell_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "'\\''"))
-}
-
-fn mock_claude_agent_config(state_path: &Path) -> ClaudeAgentConfig {
-    let root = repo_root();
-    ClaudeAgentConfig {
-        command: format!(
-            "RAVEN_CLAUDE_AGENT_MOCK=1 RAVEN_CLAUDE_AGENT_MOCK_STATE={} node {}",
-            shell_quote(&state_path.display().to_string()),
-            shell_quote(
-                &root
-                    .join("scripts/claude-agent-sidecar.mjs")
-                    .display()
-                    .to_string()
-            )
-        ),
-        workdir: Some(root.clone()),
-        alexandria_plugin_path: Some(root.join(".claude/plugins/alexandria")),
-        model: None,
-        permission_mode: "dontAsk".to_string(),
-        max_turns: 4,
-        timeout: Duration::from_secs(30),
-    }
 }
 
 /// True iff `ev` is evidence that `bot_nick` av-joined a call.

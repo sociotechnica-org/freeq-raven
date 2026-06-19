@@ -26,7 +26,6 @@ pub struct ClaudeAgentTurn {
     pub question: String,
     pub session_context: String,
     pub system_prompt: String,
-    pub session_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -94,7 +93,7 @@ pub async fn ask(
         let guard = sessions.lock().await;
         guard.get(&turn.channel).cloned()
     };
-    let session_id = turn.session_id.as_deref().or(remembered_session.as_deref());
+    let session_id = remembered_session.as_deref();
     let req = SidecarRequest {
         id: "freeq-raven-turn",
         request_type: "turn",
@@ -232,7 +231,6 @@ mod tests {
                 question: "Raven, remember that the launch codename is Night Library.".to_string(),
                 session_context: String::new(),
                 system_prompt: "You are Raven.".to_string(),
-                session_id: None,
             },
         )
         .await?;
@@ -249,7 +247,6 @@ mod tests {
                 question: "Raven, what did I ask you to remember?".to_string(),
                 session_context: String::new(),
                 system_prompt: "You are Raven.".to_string(),
-                session_id: None,
             },
         )
         .await?;

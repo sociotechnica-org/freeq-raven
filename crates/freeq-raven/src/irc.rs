@@ -146,6 +146,12 @@ fn configured_answer_provider(cfg: &SharedConfig) -> AnswerProvider {
 }
 
 fn missing_answer_config(cfg: &SharedConfig) -> Option<String> {
+    // The Claude Agent SDK sidecar is its own LLM/session/tool path and
+    // does not use the direct provider keys, so it has no missing-key
+    // precondition to enforce here.
+    if cfg.claude_agent.is_some() {
+        return None;
+    }
     match configured_answer_provider(cfg) {
         AnswerProvider::Anthropic if cfg.anthropic_key.is_none() => {
             Some("Q&A needs ANTHROPIC_API_KEY for the selected Claude model.".to_string())
@@ -935,9 +941,7 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
                     );
                     continue;
                 }
-                if cfg.claude_agent.is_none()
-                    && let Some(reason) = missing_answer_config(&cfg)
-                {
+                if let Some(reason) = missing_answer_config(&cfg) {
                     let _ = handle_arc
                         .privmsg(&target, &format!("{from}: {reason}"))
                         .await;
@@ -983,9 +987,7 @@ async fn answer_and_speak(
     // The asker's own video (their screen/camera), for visual questions.
     asker_video: Option<VideoHandle>,
 ) {
-    if cfg.claude_agent.is_none()
-        && let Some(reason) = missing_answer_config(&cfg)
-    {
+    if let Some(reason) = missing_answer_config(&cfg) {
         let _ = handle
             .privmsg(&channel, &format!("{asker}: {reason}"))
             .await;
@@ -1169,12 +1171,12 @@ async fn answer_and_speak(
         // respond — by name, with a comma. The named bot's STT
         // picks that up, address detection fires, peer answers, and
         // the chain self-sustains until the discussion window expires.
+        let base_system_prompt = cfg
+            .character_system_prompt
+            .clone()
+            .unwrap_or_else(|| qa::default_system_prompt().to_string());
         let effective_system_prompt =
             if is_discussion_mode_active(&cfg) && !cfg.peer_agents.is_empty() {
-                let base = cfg
-                    .character_system_prompt
-                    .clone()
-                    .unwrap_or_else(|| qa::default_system_prompt().to_string());
                 // Build a peer list excluding ourselves so the bot
                 // does not accidentally address itself.
                 let self_canonical = cfg
@@ -1191,16 +1193,14 @@ async fn answer_and_speak(
                     .collect();
                 let peer_list = peers.join(", ");
                 format!(
-                    "{base}\n\nDISCUSSION MODE IS ACTIVE. After your answer \
+                    "{base_system_prompt}\n\nDISCUSSION MODE IS ACTIVE. After your answer \
 (1-2 sentences max), end with a one-sentence direct address to ONE specific \
 peer by name (\"{peer_list}\") inviting their response. Format: \"<Name>, \
 <one-line follow-up question>.\" Pick the peer whose viewpoint would most \
 sharpen the thread. Do NOT address yourself."
                 )
             } else {
-                cfg.character_system_prompt
-                    .clone()
-                    .unwrap_or_else(|| qa::default_system_prompt().to_string())
+                base_system_prompt
             };
 
         if let Some(agent_cfg) = cfg.claude_agent.as_ref() {
@@ -1215,7 +1215,6 @@ sharpen the thread. Do NOT address yourself."
                     question: question.clone(),
                     session_context: transcript.clone(),
                     system_prompt: effective_system_prompt,
-                    session_id: None,
                 },
             )
             .await
