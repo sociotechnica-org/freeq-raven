@@ -357,6 +357,9 @@ pub struct RunConfig {
     /// Inception API key + Mercury reasoning effort for fast live Q&A.
     pub inception_api_key: Option<String>,
     pub inception_reasoning_effort: String,
+    /// Optional Alexandria room-bot monitor. When set, Raven relays
+    /// play feedback gates into the Freeq room.
+    pub alexandria: Option<crate::alexandria::AlexandriaConfig>,
     /// Optional Claude Agent SDK sidecar. When set, addressed room
     /// turns use the sidecar as the primary LLM/session/tool loop.
     pub claude_agent: Option<claude_agent::ClaudeAgentConfig>,
@@ -419,6 +422,8 @@ pub(crate) struct SharedConfig {
     pub(crate) groq_answer_model: String,
     pub(crate) inception_api_key: Option<String>,
     pub(crate) inception_reasoning_effort: String,
+    pub(crate) alexandria: Option<crate::alexandria::AlexandriaConfig>,
+    pub(crate) alexandria_feedback: crate::alexandria::PendingFeedbackStore,
     pub(crate) claude_agent: Option<claude_agent::ClaudeAgentConfig>,
     pub(crate) vision_model: String,
     pub(crate) elevenlabs_api_key: Option<String>,
@@ -563,6 +568,7 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
         groq_answer_model,
         inception_api_key,
         inception_reasoning_effort,
+        alexandria,
         claude_agent,
         vision_model,
         elevenlabs_api_key,
@@ -676,6 +682,8 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
         groq_answer_model,
         inception_api_key,
         inception_reasoning_effort,
+        alexandria,
+        alexandria_feedback: crate::alexandria::pending_feedback_store(),
         claude_agent,
         vision_model,
         elevenlabs_api_key,
@@ -707,6 +715,14 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
         started_at: Instant::now(),
     });
     let handle_arc = Arc::new(handle);
+    let _alexandria_monitor = cfg.alexandria.as_ref().map(|alexandria| {
+        crate::alexandria::spawn_monitor(
+            alexandria.clone(),
+            handle_arc.clone(),
+            cfg.channels.clone(),
+            cfg.alexandria_feedback.clone(),
+        )
+    });
 
     // Discover-or-start. If `--start-session-in` is set we want a call
     // running — but a blind `av-start` is rejected by the server when
@@ -1103,6 +1119,20 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
                     );
                     send_typing_stop(&handle_arc, &target).await;
                     continue;
+                }
+                if let Some(alexandria) = cfg.alexandria.clone() {
+                    if crate::alexandria::handle_addressed_feedback(
+                        alexandria,
+                        handle_arc.clone(),
+                        cfg.alexandria_feedback.clone(),
+                        &target,
+                        &from,
+                        &question,
+                    )
+                    .await
+                    {
+                        continue;
+                    }
                 }
                 if let Some(reason) = missing_answer_config(&cfg) {
                     send_typing_stop(&handle_arc, &target).await;
