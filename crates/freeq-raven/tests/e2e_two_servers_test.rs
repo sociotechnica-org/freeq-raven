@@ -20,12 +20,15 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use freeq_raven::identity::{self, Identity};
+use freeq_raven::claude_agent::ClaudeAgentConfig;
 use freeq_raven::irc::{RunConfig, run};
 use freeq_raven::stt::SttEngine;
 use freeq_sdk::client::{self, ClientHandle, ConnectConfig};
 use freeq_sdk::event::Event;
 use tokio::sync::mpsc::Receiver;
+
+mod common;
+use common::{mint_identity, mock_claude_agent_config};
 
 // ───────────────────────────── server bootstrap ─────────────────────────────
 
@@ -150,15 +153,6 @@ fn spawn_server(name: &str) -> TestServer {
 /// Generous CI-friendly ceiling for "the bot should have done X by now".
 const SETTLE: Duration = Duration::from_secs(20);
 
-/// Build a throwaway `did:key` identity for the bot, rooted in a tempdir
-/// so we never touch `$HOME/.freeq`. Returns the identity plus the
-/// tempdir guard (kept alive by the caller for the test's lifetime).
-fn mint_identity(name: &str) -> (Identity, tempfile::TempDir) {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let ident = identity::load_or_create_in(name, tmp.path()).expect("mint identity");
-    (ident, tmp)
-}
-
 /// A guest (non-SASL) SDK client used to observe what the bot puts on
 /// the wire. `signer: None` → the server lets it in as a guest.
 struct Witness {
@@ -208,6 +202,7 @@ impl Witness {
                 Ok(Some(Event::Joined {
                     channel: c,
                     nick: n,
+                    ..
                 })) if c.eq_ignore_ascii_case(channel) && n.eq_ignore_ascii_case(nick) => {
                     break;
                 }
@@ -270,6 +265,18 @@ fn spawn_bot(
     tokio::task::JoinHandle<anyhow::Result<()>>,
     tempfile::TempDir,
 ) {
+    spawn_bot_with_claude_agent(server, channels, bot_name, None)
+}
+
+fn spawn_bot_with_claude_agent(
+    server: &str,
+    channels: Vec<String>,
+    bot_name: &str,
+    claude_agent: Option<ClaudeAgentConfig>,
+) -> (
+    tokio::task::JoinHandle<anyhow::Result<()>>,
+    tempfile::TempDir,
+) {
     let (ident, tmp) = mint_identity(bot_name);
     let cfg = RunConfig {
         server: server.to_string(),
@@ -297,8 +304,7 @@ fn spawn_bot(
         groq_answer_model: "groq/compound".to_string(),
         inception_api_key: None,
         inception_reasoning_effort: "instant".to_string(),
-        tool_command: None,
-        tool_workdir: None,
+        claude_agent,
         vision_model: "meta-llama/llama-4-scout-17b-16e-instruct".to_string(),
         elevenlabs_api_key: None,
         elevenlabs_voice_id: "aj0fZfXTBc7E3By4X8L2".to_string(),
@@ -409,7 +415,7 @@ async fn scenario_1_idle_no_call() {
     // Witness should see the bot join the channel.
     let saw_bot = witness
         .wait_for(SETTLE, |ev| match ev {
-            Event::Joined { nick, channel } if channel.eq_ignore_ascii_case("#avtest") => {
+            Event::Joined { nick, channel, .. } if channel.eq_ignore_ascii_case("#avtest") => {
                 if nick.eq_ignore_ascii_case("idlebot") {
                     Some(())
                 } else {
@@ -771,5 +777,101 @@ async fn scenario_8_foreign_channel() {
     assert_eq!(
         bot_av_joins, 0,
         "bot sent an av-join into its own channel for a foreign-channel call",
+    );
+}
+
+// ───────────────────────────── scenario 9 ───────────────────────────────────
+
+/// Addressed chat uses the Claude Agent SDK sidecar and resumes the same
+/// per-channel Claude session on the next addressed turn.
+///
+/// This drives the real Freeq server/client path:
+/// witness PRIVMSG -> freeq-server -> Raven Event::Message ->
+/// answer_and_speak -> claude_agent sidecar -> Raven PRIVMSG.
+#[tokio::test]
+async fn scenario_9_addressed_chat_uses_claude_agent_session() {
+    let server = spawn_server("claude-agent-chat-srv");
+    let addr = server.addr_str();
+
+    let mut witness = Witness::join(&addr, "alice", "#avtest").await;
+    let mock_state = tempfile::NamedTempFile::new().expect("mock sidecar state file");
+    let (_bot, _tmp) = spawn_bot_with_claude_agent(
+        &addr,
+        vec!["#avtest".to_string()],
+        "ravenbot",
+        Some(mock_claude_agent_config(mock_state.path())),
+    );
+
+    assert!(
+        witness
+            .wait_for(SETTLE, |ev| match ev {
+                Event::Joined { nick, channel, .. }
+                    if nick.eq_ignore_ascii_case("ravenbot")
+                        && channel.eq_ignore_ascii_case("#avtest") =>
+                {
+                    Some(())
+                }
+                _ => None,
+            })
+            .await
+            .is_some(),
+        "bot never joined #avtest",
+    );
+
+    // Raven intentionally ignores addressed messages during startup
+    // history replay. Wait past that window so this is a live turn.
+    tokio::time::sleep(Duration::from_secs(16)).await;
+
+    witness
+        .handle
+        .privmsg(
+            "#avtest",
+            "ravenbot, remember that the launch codename is Night Library.",
+        )
+        .await
+        .expect("send first addressed chat turn");
+
+    let first = witness
+        .wait_for(SETTLE, |ev| match ev {
+            Event::Message {
+                from, target, text, ..
+            } if from.eq_ignore_ascii_case("ravenbot")
+                && target.eq_ignore_ascii_case("#avtest")
+                && text.contains("Night Library") =>
+            {
+                Some(text.clone())
+            }
+            _ => None,
+        })
+        .await
+        .expect("Raven never answered the first Claude sidecar turn");
+    assert!(
+        first.contains("Mock Raven heard"),
+        "first reply did not come from mock Claude sidecar: {first}",
+    );
+
+    witness
+        .handle
+        .privmsg("#avtest", "ravenbot, what did I ask you to remember?")
+        .await
+        .expect("send second addressed chat turn");
+
+    let second = witness
+        .wait_for(SETTLE, |ev| match ev {
+            Event::Message {
+                from, target, text, ..
+            } if from.eq_ignore_ascii_case("ravenbot")
+                && target.eq_ignore_ascii_case("#avtest")
+                && text.contains("You asked me to remember") =>
+            {
+                Some(text.clone())
+            }
+            _ => None,
+        })
+        .await
+        .expect("Raven never answered the resumed Claude sidecar turn");
+    assert!(
+        second.contains("Night Library"),
+        "second reply did not preserve Claude session memory: {second}",
     );
 }

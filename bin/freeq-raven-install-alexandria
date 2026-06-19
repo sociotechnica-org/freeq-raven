@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TARGET="${RAVEN_AGENT_WORKDIR:-$ROOT}"
+
+if [[ "$TARGET" != /* ]]; then
+  TARGET="$(cd "$TARGET" && pwd)"
+fi
+
+mkdir -p "$TARGET"
+cd "$TARGET"
+
+export ALEXANDRIA_ACP_PROVIDER="${ALEXANDRIA_ACP_PROVIDER:-claude}"
+export ALEXANDRIA_AX_INSTALL_DIR="${ALEXANDRIA_AX_INSTALL_DIR:-$TARGET/.alexandria-next/bin}"
+export ALEXANDRIA_AX2_INSTALL_DIR="${ALEXANDRIA_AX2_INSTALL_DIR:-$ALEXANDRIA_AX_INSTALL_DIR}"
+export PATH="$ALEXANDRIA_AX_INSTALL_DIR:$PATH"
+
+install_args=(--yes --acp-provider "$ALEXANDRIA_ACP_PROVIDER")
+if [[ "${RAVEN_ALEXANDRIA_INIT:-1}" == "1" ]]; then
+  install_args+=(--init)
+fi
+
+curl -fsSL https://getalexandria.ai/install.sh |
+  bash -s -- "${install_args[@]}"
+
+plugin_dir="$TARGET/.claude/plugins/alexandria"
+if [[ ! -d "$plugin_dir/skills" && ! -d "$plugin_dir/.claude-plugin" ]]; then
+  echo "Alexandria installer completed, but $plugin_dir does not look like a Claude plugin." >&2
+  exit 1
+fi
+
+echo "Alexandria Claude plugin ready at $plugin_dir"
