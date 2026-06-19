@@ -1060,6 +1060,10 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
                     }
                     continue;
                 }
+                let addressed_question = address_with_aliases(&text, &cfg.nick);
+                if addressed_question.is_some() {
+                    send_typing_start(&handle_arc, &target).await;
+                }
                 let retain_full_session_context = active
                     .lock()
                     .await
@@ -1077,7 +1081,7 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
                         SESSION_CONTEXT_QA_TAIL_LINES,
                     );
                 }
-                let Some(question) = address_with_aliases(&text, &cfg.nick) else {
+                let Some(question) = addressed_question else {
                     continue;
                 };
                 // Don't answer the burst of channel history the server
@@ -1085,6 +1089,7 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
                 // predate the bot and aren't being asked of it now.
                 if cfg.started_at.elapsed() < STARTUP_GRACE {
                     tracing::info!(%from, "ignoring addressed chat message (startup grace)");
+                    send_typing_stop(&handle_arc, &target).await;
                     continue;
                 }
                 // Multi-agent chatter guard: if the last several
@@ -1096,9 +1101,11 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
                         %from,
                         "suppressing chat reply — recent addressers all peer agents (waiting for a human)"
                     );
+                    send_typing_stop(&handle_arc, &target).await;
                     continue;
                 }
                 if let Some(reason) = missing_answer_config(&cfg) {
+                    send_typing_stop(&handle_arc, &target).await;
                     let _ = handle_arc
                         .privmsg(&target, &format!("{from}: {reason}"))
                         .await;
@@ -1154,7 +1161,11 @@ async fn answer_and_speak(
     asker_video: Option<VideoHandle>,
     retain_full_session_context: bool,
 ) {
+    let typed_chat = speaker.is_none();
     if let Some(reason) = missing_answer_config(&cfg) {
+        if typed_chat {
+            send_typing_stop(&handle, &channel).await;
+        }
         let _ = handle
             .privmsg(&channel, &format!("{asker}: {reason}"))
             .await;
@@ -1484,6 +1495,9 @@ sharpen the thread. Do NOT address yourself."
             if let Some(t) = speak_task {
                 let _ = t.await;
             }
+            if typed_chat {
+                send_typing_stop(&handle, &channel).await;
+            }
             let _ = handle
                 .privmsg(
                     &channel,
@@ -1502,6 +1516,9 @@ sharpen the thread. Do NOT address yourself."
     // Log the full answer text — invaluable for debugging when she's
     // saying something weird (e.g. reading image alt attributes).
     tracing::info!(text = %answer.text, "answer text (sent to TTS)");
+    if typed_chat {
+        send_typing_stop(&handle, &channel).await;
+    }
     if retain_full_session_context {
         record_session_line(&cfg, &channel, "agent", &cfg.nick, &answer.text);
     } else {
@@ -2759,6 +2776,18 @@ async fn post_long(handle: &ClientHandle, channel: &str, text: &str) {
         let _ = handle.privmsg(channel, line).await;
         // Brief pacing so we don't flood-trip the server.
         tokio::time::sleep(Duration::from_millis(150)).await;
+    }
+}
+
+async fn send_typing_start(handle: &ClientHandle, channel: &str) {
+    if let Err(error) = handle.typing_start(channel).await {
+        tracing::debug!(channel, error = ?error, "typing start failed");
+    }
+}
+
+async fn send_typing_stop(handle: &ClientHandle, channel: &str) {
+    if let Err(error) = handle.typing_stop(channel).await {
+        tracing::debug!(channel, error = ?error, "typing stop failed");
     }
 }
 

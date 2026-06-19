@@ -827,6 +827,28 @@ async fn scenario_9_claude_agent_without_api_key_fails_loudly() {
         .await
         .expect("send addressed chat turn");
 
+    let first_bot_event = witness
+        .wait_for(SETTLE, |ev| match ev {
+            Event::TagMsg { from, target, tags }
+                if from.eq_ignore_ascii_case("ravenbot")
+                    && target.eq_ignore_ascii_case("#avtest")
+                    && tags.get("+typing").map(String::as_str) == Some("active") =>
+            {
+                Some("typing")
+            }
+            Event::Message {
+                from, target, text, ..
+            } if from.eq_ignore_ascii_case("ravenbot")
+                && target.eq_ignore_ascii_case("#avtest") =>
+            {
+                panic!("Raven replied before sending a typing indicator: {text}");
+            }
+            _ => None,
+        })
+        .await
+        .expect("Raven never sent typing=active for the addressed chat turn");
+    assert_eq!(first_bot_event, "typing");
+
     let reply = witness
         .wait_for(SETTLE, |ev| match ev {
             Event::Message {
