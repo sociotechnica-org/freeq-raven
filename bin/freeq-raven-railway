@@ -15,11 +15,15 @@ ALEXANDRIA_VIEWER_HOST="${ALEXANDRIA_VIEWER_HOST:-0.0.0.0}"
 ALEXANDRIA_VIEWER_PORT="${PORT:-4321}"
 ALEXANDRIA_FREEQ_RAVEN_CONNECTION_ID="${ALEXANDRIA_FREEQ_RAVEN_CONNECTION_ID:-host:freeq-raven:$ALEXANDRIA_INSTANCE_ID}"
 ALEXANDRIA_FREEQ_RAVEN_HEARTBEAT_INTERVAL_MS="${ALEXANDRIA_FREEQ_RAVEN_HEARTBEAT_INTERVAL_MS:-1000}"
+ALEXANDRIA_CLAUDE_CONNECTION_ID="${ALEXANDRIA_CLAUDE_CONNECTION_ID:-host:claude-code:freeq-raven:$ALEXANDRIA_INSTANCE_ID}"
+ALEXANDRIA_FREEQ_RAVEN_WAKE_SUBSCRIPTION_ID="${ALEXANDRIA_FREEQ_RAVEN_WAKE_SUBSCRIPTION_ID:-$ALEXANDRIA_CLAUDE_CONNECTION_ID:frame-the-problem}"
+ALEXANDRIA_FREEQ_RAVEN_WAKE_TYPES="${ALEXANDRIA_FREEQ_RAVEN_WAKE_TYPES:-play.human_input_requested play.human_input_resolved play.completed play.failed}"
 
 export HOME="${ALEXANDRIA_HOST_HOME:-$ALEXANDRIA_DATA_DIR/home}"
 export ALEXANDRIA_AX_INSTALL_DIR="${ALEXANDRIA_AX_INSTALL_DIR:-${ALEXANDRIA_AX2_INSTALL_DIR:-$ALEXANDRIA_PROJECT_DIR/.alexandria-next/bin}}"
 export ALEXANDRIA_AX2_INSTALL_DIR="$ALEXANDRIA_AX_INSTALL_DIR"
 export PATH="$ALEXANDRIA_AX_INSTALL_DIR:$PATH"
+export ALEXANDRIA_CLAUDE_CONNECTION_ID
 export RAVEN_AGENT_WORKDIR="$ALEXANDRIA_PROJECT_DIR"
 export RAVEN_ALEXANDRIA_PLUGIN_PATH="$ALEXANDRIA_PROJECT_DIR/.claude/plugins/alexandria"
 export AX_BIN="${AX_BIN:-$ALEXANDRIA_AX_INSTALL_DIR/ax}"
@@ -104,6 +108,7 @@ fi
 
 "$AX2_BIN" inspect state --json >/tmp/ax2-state.json
 
+# shellcheck disable=SC2329 # invoked by trap
 cleanup() {
 	if [[ -n "${ax2_log_tail_pid:-}" ]]; then
 		kill "$ax2_log_tail_pid" 2>/dev/null || true
@@ -170,6 +175,29 @@ wait_for_first_exit() {
 }
 
 start_ax2_runtime
+
+subscription_args=(
+	inspect subscriptions register
+	--subscription "$ALEXANDRIA_FREEQ_RAVEN_WAKE_SUBSCRIPTION_ID"
+	--connection "$ALEXANDRIA_CLAUDE_CONNECTION_ID"
+	--host claude-code
+	--if-missing
+	--json
+)
+for wake_type in $ALEXANDRIA_FREEQ_RAVEN_WAKE_TYPES; do
+	subscription_args+=(--type "$wake_type")
+done
+"$AX2_BIN" "${subscription_args[@]}" >/tmp/freeq-raven-wake-subscription.json
+
+if [[ -z "${RAVEN_ALEXANDRIA_WAKE_COMMAND:-}" ]]; then
+	printf -v RAVEN_ALEXANDRIA_WAKE_COMMAND \
+		'%q internal host claude monitor --connection %q --cursor %q --follow --json-lines --poll-interval-ms %q' \
+		"$AX2_BIN" \
+		"$ALEXANDRIA_CLAUDE_CONNECTION_ID" \
+		"$ALEXANDRIA_CLAUDE_CONNECTION_ID" \
+		"$ALEXANDRIA_FREEQ_RAVEN_HEARTBEAT_INTERVAL_MS"
+	export RAVEN_ALEXANDRIA_WAKE_COMMAND
+fi
 
 "$AX2_BIN" internal host freeq-raven heartbeat \
 	--connection "$ALEXANDRIA_FREEQ_RAVEN_CONNECTION_ID" \

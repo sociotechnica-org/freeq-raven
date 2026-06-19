@@ -11,6 +11,7 @@
 
 use std::collections::HashMap;
 use std::io::Write;
+use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -22,6 +23,7 @@ use freeq_av::{AvConfig, AvParticipant, AvSession, Speaker, VideoHandle, broadca
 use freeq_sdk::auth::{ChallengeSigner, KeySigner};
 use freeq_sdk::client::{self, ClientHandle, ConnectConfig};
 use freeq_sdk::event::Event;
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::task::{JoinHandle, JoinSet};
 
@@ -172,6 +174,7 @@ fn missing_answer_config(cfg: &SharedConfig) -> Option<String> {
 /// is retained unbounded (see `record_session_line`) so the end-of-call
 /// transcript + summary are complete.
 const SESSION_CONTEXT_QA_TAIL_LINES: usize = 200;
+const WAKE_FOLLOWUP_WINDOW: Duration = Duration::from_secs(15 * 60);
 
 fn record_session_line(cfg: &SharedConfig, channel: &str, source: &str, speaker: &str, text: &str) {
     record_session_line_inner(cfg, channel, source, speaker, text, None);
@@ -241,6 +244,159 @@ fn clear_session_context(cfg: &SharedConfig, channel: &str) {
         .lock()
         .expect("session context poisoned")
         .remove(channel);
+}
+
+fn arm_wake_followup(cfg: &SharedConfig, channel: &str) {
+    let until = Instant::now() + WAKE_FOLLOWUP_WINDOW;
+    cfg.wake_followups_until
+        .lock()
+        .expect("wake follow-up state poisoned")
+        .insert(channel.to_ascii_lowercase(), until);
+}
+
+fn wake_followup_active(cfg: &SharedConfig, channel: &str) -> bool {
+    let channel = channel.to_ascii_lowercase();
+    let now = Instant::now();
+    cfg.wake_followups_until
+        .lock()
+        .expect("wake follow-up state poisoned")
+        .get(&channel)
+        .copied()
+        .is_some_and(|until| now < until)
+}
+
+fn spawn_alexandria_wake_relay(
+    cfg: Arc<SharedConfig>,
+    handle: Arc<ClientHandle>,
+) -> Option<JoinHandle<()>> {
+    let command = cfg.alexandria_wake_command.clone()?;
+    if cfg.claude_agent.is_none() {
+        tracing::warn!("Alexandria wake command configured without Claude agent sidecar");
+        return None;
+    }
+    let Some(channel) = cfg.channels.first().cloned() else {
+        tracing::warn!("Alexandria wake command configured without a Freeq channel");
+        return None;
+    };
+    if cfg.channels.len() > 1 {
+        tracing::warn!(
+            channel = %channel,
+            channels = ?cfg.channels,
+            "Alexandria wake relay uses the first configured channel"
+        );
+    }
+
+    Some(tokio::spawn(async move {
+        loop {
+            tracing::info!(%channel, "Alexandria wake relay starting");
+            if let Err(error) =
+                run_alexandria_wake_command(cfg.clone(), handle.clone(), channel.clone(), &command)
+                    .await
+            {
+                tracing::warn!(error = ?error, "Alexandria wake relay stopped");
+            }
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        }
+    }))
+}
+
+async fn run_alexandria_wake_command(
+    cfg: Arc<SharedConfig>,
+    handle: Arc<ClientHandle>,
+    channel: String,
+    command: &str,
+) -> Result<()> {
+    let mut child = tokio::process::Command::new("/bin/sh")
+        .arg("-lc")
+        .arg(command)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .context("starting Alexandria wake command")?;
+
+    let stdout = child
+        .stdout
+        .take()
+        .context("capturing Alexandria wake command stdout")?;
+    let stderr = child
+        .stderr
+        .take()
+        .context("capturing Alexandria wake command stderr")?;
+    let stderr_task = tokio::spawn(async move {
+        let mut lines = BufReader::new(stderr).lines();
+        while let Some(line) = lines.next_line().await? {
+            tracing::info!(line = %line, "Alexandria wake command");
+        }
+        Ok::<(), std::io::Error>(())
+    });
+
+    let mut lines = BufReader::new(stdout).lines();
+    while let Some(line) = lines
+        .next_line()
+        .await
+        .context("reading Alexandria wake line")?
+    {
+        handle_alexandria_wake_line(cfg.clone(), handle.clone(), &channel, line).await;
+    }
+
+    let status = child
+        .wait()
+        .await
+        .context("waiting for Alexandria wake command")?;
+    let _ = stderr_task.await;
+    if !status.success() {
+        anyhow::bail!("Alexandria wake command exited {status}");
+    }
+    Ok(())
+}
+
+async fn handle_alexandria_wake_line(
+    cfg: Arc<SharedConfig>,
+    handle: Arc<ClientHandle>,
+    channel: &str,
+    line: String,
+) {
+    let wake = line.trim();
+    if wake.is_empty() {
+        return;
+    }
+    tracing::info!(
+        channel,
+        chars = wake.chars().count(),
+        "Alexandria wake received"
+    );
+    record_session_line_bounded(
+        &cfg,
+        channel,
+        "alexandria-wake",
+        "alexandria",
+        wake,
+        SESSION_CONTEXT_QA_TAIL_LINES,
+    );
+    let question = format!(
+        "Alexandria plugin wake for this Freeq room:\n{wake}\n\n\
+Handle this as Raven in the room. Use the installed Alexandria skills and \
+AX commands when appropriate. If this needs the director's reaction, read \
+the relevant context, ask conversationally in the room, and stop. If this \
+reports completion or failure, tell the room what happened."
+    );
+    send_typing_start(&handle, channel).await;
+    let transcript = session_context_tail(&cfg, channel, SESSION_CONTEXT_QA_TAIL_LINES);
+    answer_and_speak(
+        cfg.clone(),
+        handle,
+        channel.to_string(),
+        "alexandria".to_string(),
+        question,
+        transcript,
+        None,
+        None,
+        None,
+        false,
+    )
+    .await;
+    arm_wake_followup(&cfg, channel);
 }
 
 fn session_transcript_workdir(cfg: &SharedConfig) -> Option<std::path::PathBuf> {
@@ -360,6 +516,10 @@ pub struct RunConfig {
     /// Optional Claude Agent SDK sidecar. When set, addressed room
     /// turns use the sidecar as the primary LLM/session/tool loop.
     pub claude_agent: Option<claude_agent::ClaudeAgentConfig>,
+    /// Optional external wake stream. Each stdout line is handed to
+    /// the Claude Agent SDK as room context and Raven's answer is
+    /// posted back to the channel.
+    pub alexandria_wake_command: Option<String>,
     /// Groq vision model for questions about a participant's shared
     /// screen or camera.
     pub vision_model: String,
@@ -445,6 +605,7 @@ pub(crate) struct SharedConfig {
     pub(crate) inception_api_key: Option<String>,
     pub(crate) inception_reasoning_effort: String,
     pub(crate) claude_agent: Option<claude_agent::ClaudeAgentConfig>,
+    pub(crate) alexandria_wake_command: Option<String>,
     pub(crate) vision_model: String,
     pub(crate) elevenlabs_api_key: Option<String>,
     pub(crate) elevenlabs_voice_id: String,
@@ -512,6 +673,11 @@ pub(crate) struct SharedConfig {
     /// The sidecar resumes these sessions on follow-up turns, giving the
     /// room one long-running Claude session per channel.
     pub(crate) claude_sessions: claude_agent::ClaudeSessionMap,
+    /// Channels with a recent external wake. While active, the next
+    /// room replies are routed into the agent session even if the
+    /// human does not explicitly address Raven.
+    pub(crate) wake_followups_until:
+        std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, Instant>>>,
     /// Deadline (Instant) until which the strict human-only-address
     /// policy is relaxed and bots may answer each other freely. A
     /// human speaking the discussion trigger ("discuss it", "debate
@@ -589,6 +755,7 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
         inception_api_key,
         inception_reasoning_effort,
         claude_agent,
+        alexandria_wake_command,
         vision_model,
         elevenlabs_api_key,
         elevenlabs_voice_id,
@@ -703,6 +870,7 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
         inception_api_key,
         inception_reasoning_effort,
         claude_agent,
+        alexandria_wake_command,
         vision_model,
         elevenlabs_api_key,
         elevenlabs_voice_id,
@@ -726,6 +894,9 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
         claude_sessions: std::sync::Arc::new(tokio::sync::Mutex::new(
             std::collections::HashMap::new(),
         )),
+        wake_followups_until: std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )),
         discussion_until: std::sync::Arc::new(std::sync::Mutex::new(
             Instant::now() - Duration::from_secs(3600),
         )),
@@ -733,6 +904,7 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
         started_at: Instant::now(),
     });
     let handle_arc = Arc::new(handle);
+    let _wake_task = spawn_alexandria_wake_relay(cfg.clone(), handle_arc.clone());
 
     // Discover-or-start. If `--start-session-in` is set we want a call
     // running — but a blind `av-start` is rejected by the server when
@@ -1087,7 +1259,11 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
                     continue;
                 }
                 let addressed_question = address_with_aliases(&text, &cfg.nick);
-                if addressed_question.is_some() {
+                let wake_followup = addressed_question.is_none()
+                    && wake_followup_active(&cfg, &target)
+                    && !from.eq_ignore_ascii_case(&cfg.nick)
+                    && !is_peer_nick(&cfg.peer_agents, &from);
+                if addressed_question.is_some() || wake_followup {
                     send_typing_start(&handle_arc, &target).await;
                 }
                 let retain_full_session_context = active
@@ -1107,7 +1283,16 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
                         SESSION_CONTEXT_QA_TAIL_LINES,
                     );
                 }
-                let Some(question) = addressed_question else {
+                let Some(question) = addressed_question.or_else(|| {
+                    wake_followup.then(|| {
+                        format!(
+                            "Room reply after an Alexandria wake from {from}: {text}\n\n\
+Treat this as the director's response to your last wake-driven room ask \
+if it clearly answers it. Use the installed Alexandria skill guidance and \
+AX commands when appropriate. Do not require exact phrases."
+                        )
+                    })
+                }) else {
                     continue;
                 };
                 // Don't answer the burst of channel history the server
@@ -1147,9 +1332,9 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
                 let asker = from.clone();
                 tokio::spawn(async move {
                     answer_and_speak(
-                        cfg,
+                        cfg.clone(),
                         handle,
-                        channel,
+                        channel.clone(),
                         asker,
                         question,
                         transcript,
@@ -1159,6 +1344,9 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
                         retain_full_session_context,
                     )
                     .await;
+                    if wake_followup {
+                        arm_wake_followup(&cfg, &channel);
+                    }
                 });
             }
             Event::Disconnected { reason } => {

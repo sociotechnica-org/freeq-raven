@@ -40,6 +40,8 @@ cp "$ROOT/bin/freeq-raven-railway" "$TMP_ROOT/host/bin/freeq-raven-railway"
 cat >"$TMP_ROOT/host/bin/freeq-raven" <<SH
 #!/bin/sh
 printf started > "$TMP_ROOT/raven.started"
+printf '%s\n' "\${ALEXANDRIA_CLAUDE_CONNECTION_ID:-}" > "$TMP_ROOT/raven.claude-connection"
+printf '%s\n' "\${RAVEN_ALEXANDRIA_WAKE_COMMAND:-}" > "$TMP_ROOT/raven.wake-command"
 sleep 0.2
 SH
 chmod +x "$TMP_ROOT/host/bin/freeq-raven"
@@ -125,7 +127,10 @@ assert_not_contains "--init" "$TMP_ROOT/install.args"
 assert_contains "https://getalexandria.ai/install.sh" "$TMP_ROOT/curl.args"
 assert_not_contains "install-next.sh" "$TMP_ROOT/curl.args"
 assert_contains "init all --workspace .alexandria-next/railway-workspace --acp-provider claude" "$TMP_ROOT/ax.calls"
+assert_contains "inspect subscriptions register --subscription host:claude-code:freeq-raven:alexandria-wedo:frame-the-problem --connection host:claude-code:freeq-raven:alexandria-wedo --host claude-code --if-missing --json --type play.human_input_requested --type play.human_input_resolved --type play.completed --type play.failed" "$TMP_ROOT/ax.calls"
 assert_contains "internal host freeq-raven heartbeat --connection host:freeq-raven:alexandria-wedo --follow --poll-interval-ms 1000" "$TMP_ROOT/ax.calls"
+assert_contains "host:claude-code:freeq-raven:alexandria-wedo" "$TMP_ROOT/raven.claude-connection"
+assert_contains "internal host claude monitor --connection host:claude-code:freeq-raven:alexandria-wedo --cursor host:claude-code:freeq-raven:alexandria-wedo --follow --json-lines --poll-interval-ms 1000" "$TMP_ROOT/raven.wake-command"
 assert_contains '"workspace":".alexandria-next/railway-workspace"' "$TMP_ROOT/data/projects/alexandria-wedo/.alexandria-next/alexandria-config.json"
 
 workspace_link="$TMP_ROOT/data/projects/alexandria-wedo/.alexandria-next/railway-workspace"

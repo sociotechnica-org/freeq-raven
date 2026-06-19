@@ -162,6 +162,11 @@ struct Cli {
     #[arg(long, env = "RAVEN_AGENT_TIMEOUT_SECS", default_value_t = 300)]
     agent_timeout_secs: u64,
 
+    /// External command that emits one Alexandria wake JSON line on stdout.
+    /// Each line is routed into the same Claude Agent SDK room session.
+    #[arg(long, env = "RAVEN_ALEXANDRIA_WAKE_COMMAND")]
+    alexandria_wake_command: Option<String>,
+
     /// Groq vision model for questions about a participant's shared
     /// screen or camera (e.g. "Raven, what's on my screen?").
     #[arg(long, default_value = "meta-llama/llama-4-scout-17b-16e-instruct")]
@@ -379,6 +384,7 @@ async fn main() -> Result<()> {
             max_turns: cli.agent_max_turns,
             timeout: std::time::Duration::from_secs(cli.agent_timeout_secs),
         }),
+        alexandria_wake_command: cli.alexandria_wake_command.filter(|s| !s.trim().is_empty()),
         vision_model: cli.vision_model,
         elevenlabs_api_key,
         elevenlabs_model: cli.elevenlabs_model,
