@@ -214,13 +214,11 @@ fn record_session_line_inner(
     }
 }
 
+/// Full rolling session context, joined. Feeds the end-of-call
+/// transcript + summary, which need the complete history; live Q&A
+/// uses [`session_context_tail`] for a bounded prompt instead.
 fn session_context_snapshot(cfg: &SharedConfig, channel: &str) -> String {
-    cfg.session_context
-        .lock()
-        .expect("session context poisoned")
-        .get(channel)
-        .map(|lines| lines.join("\n"))
-        .unwrap_or_default()
+    session_context_tail(cfg, channel, usize::MAX)
 }
 
 /// Last `max` lines of the rolling session context, joined. Feeds live
@@ -295,10 +293,7 @@ fn write_session_transcript(
         out.push_str("_(none captured)_\n\n");
     } else {
         for d in decisions {
-            match &d.when {
-                Some(w) => out.push_str(&format!("- {} — {} (by {})\n", d.who, d.what, w)),
-                None => out.push_str(&format!("- {} — {}\n", d.who, d.what)),
-            }
+            out.push_str(&format!("- {}\n", d.render_line()));
         }
         out.push('\n');
     }
@@ -931,12 +926,7 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
                                 .privmsg(&channel_for_post, "Decisions captured this session:")
                                 .await;
                             for d in &drained {
-                                let line = match &d.when {
-                                    Some(w) => {
-                                        format!("  • {} — {} (by {})", d.who, d.what, w)
-                                    }
-                                    None => format!("  • {} — {}", d.who, d.what),
-                                };
+                                let line = format!("  • {}", d.render_line());
                                 let _ = handle.privmsg(&channel_for_post, &line).await;
                             }
                         }
