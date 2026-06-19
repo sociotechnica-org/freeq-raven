@@ -28,4 +28,6 @@ RUN apt-get update \
 
 COPY --from=builder /app /app
 
+RUN npm ci --omit=dev
+
 CMD ["./bin/freeq-raven-railway"]
