@@ -1843,6 +1843,41 @@ pub(crate) fn overlay_svg_for_visual_backend(tile: &VideoTile, time: f32) -> Opt
     Some(svg)
 }
 
+/// Rasterize an overlay SVG (from [`overlay_svg_for_visual_backend`]) onto the
+/// transparent `scratch` pixmap, then composite it over `base`. Shared by every
+/// single-layer visual backend (coin, particles) so the parse → clear → render
+/// → draw_pixmap dance lives in one place. A parse failure is logged and
+/// skipped — a malformed overlay must never kill the frame.
+pub(crate) fn composite_overlay(
+    base: &mut resvg::tiny_skia::Pixmap,
+    scratch: &mut resvg::tiny_skia::Pixmap,
+    svg: &str,
+    opt: &resvg::usvg::Options,
+) {
+    let tree = match resvg::usvg::Tree::from_str(svg, opt) {
+        Ok(t) => t,
+        Err(_) => {
+            tracing::debug!("overlay SVG failed to parse, skipping");
+            return;
+        }
+    };
+    // Overlay rasterizes onto a transparent canvas; composite that onto `base`.
+    scratch.data_mut().fill(0);
+    resvg::render(
+        &tree,
+        resvg::tiny_skia::Transform::identity(),
+        &mut scratch.as_mut(),
+    );
+    base.draw_pixmap(
+        0,
+        0,
+        scratch.as_ref(),
+        &resvg::tiny_skia::PixmapPaint::default(),
+        resvg::tiny_skia::Transform::identity(),
+        None,
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

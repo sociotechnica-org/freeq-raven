@@ -16,10 +16,12 @@ use anyhow::{Context, Result};
 use bytes::Bytes;
 use image::{GenericImageView, RgbaImage, imageops::FilterType};
 use iroh_live::media::format::VideoFrame;
-use resvg::tiny_skia::{IntSize, Pixmap, PixmapPaint, Transform};
+use resvg::tiny_skia::{IntSize, Pixmap};
 use resvg::usvg;
 
-use crate::video::{VIDEO_H, VIDEO_W, VideoTile, overlay_svg_for_visual_backend};
+use crate::video::{
+    VIDEO_H, VIDEO_W, VideoTile, composite_overlay, overlay_svg_for_visual_backend,
+};
 
 const FPS: u64 = 30;
 const FRAME_LEN: usize = VIDEO_W as usize * VIDEO_H as usize * 4;
@@ -102,7 +104,10 @@ fn render_mp4_loop(tile: VideoTile) -> Result<()> {
 
     let frame_dt = Duration::from_millis(1000 / FPS);
     let started = Instant::now();
-    let mut last_frame: Option<Vec<u8>> = None;
+    // Ref-counted handle to the last published frame, kept only to seed a
+    // crossfade on the rare state change — cloning it is a refcount bump, not
+    // a per-frame ~3.7 MB memcpy.
+    let mut last_frame: Option<Bytes> = None;
     let mut crossfade: Option<Crossfade> = None;
     tracing::info!("raven coin MP4 renderer started ({VIDEO_W}x{VIDEO_H} @ {FPS}fps)");
 
@@ -117,7 +122,7 @@ fn render_mp4_loop(tile: VideoTile) -> Result<()> {
             reader.switch(state, assets.path(state))?;
         }
 
-        let mut data = reader.read_frame(assets.path(state))?;
+        let mut data = reader.read_frame()?;
         if let Some(fade) = crossfade.as_mut() {
             fade.blend_into(&mut data);
             if fade.is_done() {
@@ -125,28 +130,21 @@ fn render_mp4_loop(tile: VideoTile) -> Result<()> {
             }
         }
         if let Some(overlay_svg) = overlay_svg_for_visual_backend(&tile, t) {
-            if let Ok(tree) = usvg::Tree::from_str(&overlay_svg, &usvg_opt) {
-                let Some(mut frame_pixmap) = Pixmap::from_vec(data, frame_size) else {
-                    anyhow::bail!("ffmpeg frame had unexpected size");
-                };
-                overlay_pixmap.data_mut().fill(0);
-                resvg::render(&tree, Transform::identity(), &mut overlay_pixmap.as_mut());
-                frame_pixmap.draw_pixmap(
-                    0,
-                    0,
-                    overlay_pixmap.as_ref(),
-                    &PixmapPaint::default(),
-                    Transform::identity(),
-                    None,
-                );
-                data = frame_pixmap.take();
-            } else {
-                tracing::debug!("coin overlay SVG failed to parse, skipping");
-            }
+            let Some(mut frame_pixmap) = Pixmap::from_vec(data, frame_size) else {
+                anyhow::bail!("ffmpeg frame had unexpected size");
+            };
+            composite_overlay(
+                &mut frame_pixmap,
+                &mut overlay_pixmap,
+                &overlay_svg,
+                &usvg_opt,
+            );
+            data = frame_pixmap.take();
         }
-        last_frame = Some(data.clone());
 
-        let rendered = VideoFrame::new_rgba(Bytes::from(data), VIDEO_W, VIDEO_H, Duration::ZERO);
+        let bytes = Bytes::from(data);
+        last_frame = Some(bytes.clone());
+        let rendered = VideoFrame::new_rgba(bytes, VIDEO_W, VIDEO_H, Duration::ZERO);
         if let Ok(mut g) = tile.latest.lock() {
             *g = Some(rendered);
         }
@@ -160,7 +158,11 @@ fn render_mp4_loop(tile: VideoTile) -> Result<()> {
     Ok(())
 }
 
-fn tile_state(tile: &VideoTile) -> CoinState {
+/// Snapshot the tile's audio/vision signals: `(level, peer, thinking,
+/// has_vision_thumb)`. Both the MP4 ([`tile_state`]) and PNG
+/// ([`render_png_loop`]) renderers read the same four values to drive their
+/// state/lighting, so the load-and-clamp idiom lives here once.
+fn read_signals(tile: &VideoTile) -> (f32, f32, bool, bool) {
     let level = f32::from_bits(tile.level.load(Ordering::Relaxed)).clamp(0.0, 1.0);
     let peer = f32::from_bits(tile.peer_level.load(Ordering::Relaxed)).clamp(0.0, 1.0);
     let thinking = tile.thinking.load(Ordering::Relaxed);
@@ -170,16 +172,21 @@ fn tile_state(tile: &VideoTile) -> CoinState {
         .ok()
         .map(|g| g.is_some())
         .unwrap_or(false);
+    (level, peer, thinking, has_vision_thumb)
+}
+
+fn tile_state(tile: &VideoTile) -> CoinState {
+    let (level, peer, thinking, has_vision_thumb) = read_signals(tile);
     visual_state(level, peer, thinking, has_vision_thumb)
 }
 
 struct Crossfade {
-    from: Vec<u8>,
+    from: Bytes,
     frame: u32,
 }
 
 impl Crossfade {
-    fn new(from: Vec<u8>) -> Self {
+    fn new(from: Bytes) -> Self {
         Self { from, frame: 0 }
     }
 
@@ -274,6 +281,10 @@ fn write_state_asset(dir: &Path, state: CoinState) -> Result<PathBuf> {
 
 struct FfmpegLoopReader {
     state: CoinState,
+    /// Path of the loop ffmpeg is currently decoding — always the file for
+    /// `state`. Owned here so `read_frame` can restart on stream-end without
+    /// the caller re-threading a path that must match `state`.
+    path: PathBuf,
     child: Child,
     stdout: ChildStdout,
 }
@@ -283,6 +294,7 @@ impl FfmpegLoopReader {
         let (child, stdout) = spawn_ffmpeg_loop(state, path)?;
         Ok(Self {
             state,
+            path: path.to_path_buf(),
             child,
             stdout,
         })
@@ -296,7 +308,7 @@ impl FfmpegLoopReader {
         self.restart(state, path)
     }
 
-    fn read_frame(&mut self, path: &Path) -> Result<Vec<u8>> {
+    fn read_frame(&mut self) -> Result<Vec<u8>> {
         let mut frame = vec![0; FRAME_LEN];
         if let Err(error) = self.stdout.read_exact(&mut frame) {
             tracing::warn!(
@@ -304,7 +316,8 @@ impl FfmpegLoopReader {
                 error = ?error,
                 "coin renderer: MP4 stream ended; restarting loop"
             );
-            self.restart(self.state, path)?;
+            let (state, path) = (self.state, self.path.clone());
+            self.restart(state, &path)?;
             self.stdout.read_exact(&mut frame).with_context(|| {
                 format!("reading first frame after restarting {:?}", self.state)
             })?;
@@ -317,6 +330,7 @@ impl FfmpegLoopReader {
         let _ = self.child.wait();
         let (child, stdout) = spawn_ffmpeg_loop(state, path)?;
         self.state = state;
+        self.path = path.to_path_buf();
         self.child = child;
         self.stdout = stdout;
         Ok(())
@@ -395,36 +409,18 @@ fn render_png_loop(tile: VideoTile) {
         let tick = Instant::now();
         let t = started.elapsed().as_secs_f32();
 
-        let level = f32::from_bits(tile.level.load(Ordering::Relaxed)).clamp(0.0, 1.0);
-        let peer = f32::from_bits(tile.peer_level.load(Ordering::Relaxed)).clamp(0.0, 1.0);
-        let thinking = tile.thinking.load(Ordering::Relaxed);
-        let has_vision_thumb = tile
-            .vision_thumb
-            .lock()
-            .ok()
-            .map(|g| g.is_some())
-            .unwrap_or(false);
-
-        let lighting = coin_lighting(level, peer, thinking, has_vision_thumb);
+        let (level, peer, thinking, has_vision_thumb) = read_signals(&tile);
+        let lighting = coin_lighting(
+            visual_state(level, peer, thinking, has_vision_thumb),
+            level,
+            peer,
+        );
         draw_background(frame.data_mut(), lighting.energy);
         draw_coin_glow(frame.data_mut(), lighting.glow_mix, lighting.energy);
         draw_coin(frame.data_mut(), &unlit, &lit, lighting.lit_mix);
 
         if let Some(overlay_svg) = overlay_svg_for_visual_backend(&tile, t) {
-            if let Ok(tree) = usvg::Tree::from_str(&overlay_svg, &usvg_opt) {
-                overlay_pixmap.data_mut().fill(0);
-                resvg::render(&tree, Transform::identity(), &mut overlay_pixmap.as_mut());
-                frame.draw_pixmap(
-                    0,
-                    0,
-                    overlay_pixmap.as_ref(),
-                    &PixmapPaint::default(),
-                    Transform::identity(),
-                    None,
-                );
-            } else {
-                tracing::debug!("coin overlay SVG failed to parse, skipping");
-            }
+            composite_overlay(&mut frame, &mut overlay_pixmap, &overlay_svg, &usvg_opt);
         }
 
         let data = Bytes::copy_from_slice(frame.data());
@@ -447,23 +443,23 @@ struct CoinLighting {
     energy: f32,
 }
 
-fn coin_lighting(level: f32, peer: f32, thinking: bool, has_vision_thumb: bool) -> CoinLighting {
-    let (lit_mix, energy) = if has_vision_thumb {
-        (0.9, 0.8)
-    } else if level > 0.03 {
-        (
+/// Map the already-classified [`CoinState`] to PNG-renderer lighting. The
+/// state/priority ladder lives solely in [`visual_state`]; this just lights
+/// each state, scaling speaking/listening by their continuous level so the two
+/// renderers can't drift on which state wins.
+fn coin_lighting(state: CoinState, level: f32, peer: f32) -> CoinLighting {
+    let (lit_mix, energy) = match state {
+        CoinState::Vision => (0.9, 0.8),
+        CoinState::Speaking => (
             (0.42 + level * 0.72).min(1.0),
             (0.45 + level * 0.55).min(1.0),
-        )
-    } else if thinking {
-        (0.68, 0.62)
-    } else if peer > 0.03 {
-        (
+        ),
+        CoinState::Thinking => (0.68, 0.62),
+        CoinState::Listening => (
             (0.24 + peer * 0.58).min(0.88),
             (0.30 + peer * 0.5).min(0.72),
-        )
-    } else {
-        (0.24, 0.22)
+        ),
+        CoinState::Idle => (0.24, 0.22),
     };
 
     CoinLighting {

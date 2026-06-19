@@ -36,8 +36,6 @@ use clap::Parser;
 
 use freeq_raven::{character_profile, identity, imagegen, irc, stt};
 
-const DEFAULT_ELEVENLABS_VOICE: &str = "aj0fZfXTBc7E3By4X8L2";
-
 #[derive(Parser, Debug, Clone)]
 #[command(
     name = "freeq-raven",
@@ -238,7 +236,12 @@ async fn main() -> Result<()> {
     // "oblivion", instead of sharing raven's identity and getting
     // server-side rebound to her nick. Explicit `--name` always wins.
     let identity_name = cli.name.clone().unwrap_or_else(|| {
-        if cli.render_backend == "particles" && !cli.ghostly_character.is_empty() {
+        // Match the same normalization `irc.rs` applies when selecting the
+        // backend, so `--render-backend Particles` (or stray whitespace) still
+        // routes identity to the character rather than silently falling to raven.
+        if cli.render_backend.trim().eq_ignore_ascii_case("particles")
+            && !cli.ghostly_character.is_empty()
+        {
             cli.ghostly_character.clone()
         } else {
             "raven".to_string()
@@ -316,6 +319,9 @@ async fn main() -> Result<()> {
     }
 
     let agent_model = cli.groq_answer_model.clone();
+    // The active character profile supplies voice + system-prompt defaults;
+    // looked up once and reused for both below.
+    let profile = character_profile::by_name(&cli.ghostly_character);
     irc::run(irc::RunConfig {
         server: cli.server,
         channels: cli.channel,
@@ -358,12 +364,9 @@ async fn main() -> Result<()> {
         elevenlabs_voice_id: cli
             .elevenlabs_voice
             .clone()
-            .or_else(|| {
-                character_profile::by_name(&cli.ghostly_character).map(|p| p.voice_id.to_string())
-            })
-            .unwrap_or_else(|| DEFAULT_ELEVENLABS_VOICE.to_string()),
-        character_system_prompt: character_profile::by_name(&cli.ghostly_character)
-            .map(|p| p.system_prompt.to_string()),
+            .or_else(|| profile.map(|p| p.voice_id.to_string()))
+            .unwrap_or_else(|| character_profile::RAVEN.voice_id.to_string()),
+        character_system_prompt: profile.map(|p| p.system_prompt.to_string()),
         peer_agents: cli.peer_agents,
     })
     .await

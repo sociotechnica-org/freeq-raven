@@ -228,8 +228,6 @@
 
     async function speakRaven() {
       stopVoice();
-      mode = "speaking";
-      apply();
       startVoiceActivity();
       const text = voiceText.value.trim() || "Raven online.";
       setVoiceStatus(`Requesting Raven voice ${RAVEN_VOICE_ID}...`);
@@ -265,8 +263,6 @@
     }
 
     voiceAudio.addEventListener("play", () => {
-      mode = "speaking";
-      apply();
       startVoiceActivity();
     });
     voiceAudio.addEventListener("pause", () => {
