@@ -23,5 +23,4 @@ check:
 	./bin/freeq-raven-bootstrap --check
 
 test:
-	cargo test -p freeq-raven --lib
-	cargo test -p freeq-raven identity --test identity_test
+	cargo test -p freeq-raven --lib --test identity_test
