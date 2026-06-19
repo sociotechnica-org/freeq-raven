@@ -268,6 +268,10 @@ async fn main() -> Result<()> {
              end-of-call summary also disabled"
         );
     }
+    let agent_command = cli.agent_command.clone().filter(|s| !s.trim().is_empty());
+    if agent_command.is_some() && anthropic_key.is_none() {
+        anyhow::bail!("RAVEN_AGENT_COMMAND requires ANTHROPIC_API_KEY");
+    }
     // `--no-summary` only suppresses the end-of-call summary call;
     // it doesn't disable the answer-model route to Anthropic.
     let summary_enabled = !cli.no_summary;
@@ -326,18 +330,15 @@ async fn main() -> Result<()> {
         groq_answer_model: cli.groq_answer_model,
         inception_api_key,
         inception_reasoning_effort: cli.inception_reasoning_effort,
-        claude_agent: cli
-            .agent_command
-            .filter(|s| !s.trim().is_empty())
-            .map(|command| freeq_raven::claude_agent::ClaudeAgentConfig {
-                command,
-                workdir: cli.agent_workdir,
-                alexandria_plugin_path: cli.alexandria_plugin_path,
-                model: Some(agent_model),
-                permission_mode: cli.agent_permission_mode,
-                max_turns: cli.agent_max_turns,
-                timeout: std::time::Duration::from_secs(cli.agent_timeout_secs),
-            }),
+        claude_agent: agent_command.map(|command| freeq_raven::claude_agent::ClaudeAgentConfig {
+            command,
+            workdir: cli.agent_workdir,
+            alexandria_plugin_path: cli.alexandria_plugin_path,
+            model: Some(agent_model),
+            permission_mode: cli.agent_permission_mode,
+            max_turns: cli.agent_max_turns,
+            timeout: std::time::Duration::from_secs(cli.agent_timeout_secs),
+        }),
         vision_model: cli.vision_model,
         elevenlabs_api_key,
         elevenlabs_model: cli.elevenlabs_model,

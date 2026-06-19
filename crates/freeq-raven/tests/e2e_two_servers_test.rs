@@ -28,7 +28,7 @@ use freeq_sdk::event::Event;
 use tokio::sync::mpsc::Receiver;
 
 mod common;
-use common::{mint_identity, mock_claude_agent_config};
+use common::{claude_agent_without_api_key_config, mint_identity};
 
 // ───────────────────────────── server bootstrap ─────────────────────────────
 
@@ -782,24 +782,23 @@ async fn scenario_8_foreign_channel() {
 
 // ───────────────────────────── scenario 9 ───────────────────────────────────
 
-/// Addressed chat uses the Claude Agent SDK sidecar and resumes the same
-/// per-channel Claude session on the next addressed turn.
+/// Addressed chat fails loudly when the Claude Agent SDK sidecar is configured
+/// without the required Anthropic API key.
 ///
 /// This drives the real Freeq server/client path:
 /// witness PRIVMSG -> freeq-server -> Raven Event::Message ->
 /// answer_and_speak -> claude_agent sidecar -> Raven PRIVMSG.
 #[tokio::test]
-async fn scenario_9_addressed_chat_uses_claude_agent_session() {
+async fn scenario_9_claude_agent_without_api_key_fails_loudly() {
     let server = spawn_server("claude-agent-chat-srv");
     let addr = server.addr_str();
 
     let mut witness = Witness::join(&addr, "alice", "#avtest").await;
-    let mock_state = tempfile::NamedTempFile::new().expect("mock sidecar state file");
     let (_bot, _tmp) = spawn_bot_with_claude_agent(
         &addr,
         vec!["#avtest".to_string()],
         "ravenbot",
-        Some(mock_claude_agent_config(mock_state.path())),
+        Some(claude_agent_without_api_key_config()),
     );
 
     assert!(
@@ -824,54 +823,26 @@ async fn scenario_9_addressed_chat_uses_claude_agent_session() {
 
     witness
         .handle
-        .privmsg(
-            "#avtest",
-            "ravenbot, remember that the launch codename is Night Library.",
-        )
+        .privmsg("#avtest", "ravenbot, are you connected to Claude?")
         .await
-        .expect("send first addressed chat turn");
+        .expect("send addressed chat turn");
 
-    let first = witness
+    let reply = witness
         .wait_for(SETTLE, |ev| match ev {
             Event::Message {
                 from, target, text, ..
             } if from.eq_ignore_ascii_case("ravenbot")
                 && target.eq_ignore_ascii_case("#avtest")
-                && text.contains("Night Library") =>
+                && text.contains("ANTHROPIC_API_KEY is required") =>
             {
                 Some(text.clone())
             }
             _ => None,
         })
         .await
-        .expect("Raven never answered the first Claude sidecar turn");
+        .expect("Raven never surfaced the missing Claude API key error");
     assert!(
-        first.contains("Mock Raven heard"),
-        "first reply did not come from mock Claude sidecar: {first}",
-    );
-
-    witness
-        .handle
-        .privmsg("#avtest", "ravenbot, what did I ask you to remember?")
-        .await
-        .expect("send second addressed chat turn");
-
-    let second = witness
-        .wait_for(SETTLE, |ev| match ev {
-            Event::Message {
-                from, target, text, ..
-            } if from.eq_ignore_ascii_case("ravenbot")
-                && target.eq_ignore_ascii_case("#avtest")
-                && text.contains("You asked me to remember") =>
-            {
-                Some(text.clone())
-            }
-            _ => None,
-        })
-        .await
-        .expect("Raven never answered the resumed Claude sidecar turn");
-    assert!(
-        second.contains("Night Library"),
-        "second reply did not preserve Claude session memory: {second}",
+        reply.contains("claude agent sidecar failed"),
+        "Raven did not identify the sidecar failure: {reply}",
     );
 }

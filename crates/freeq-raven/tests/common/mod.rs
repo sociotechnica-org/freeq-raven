@@ -5,7 +5,7 @@
 
 #![allow(dead_code)]
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use freeq_raven::claude_agent::ClaudeAgentConfig;
@@ -34,15 +34,11 @@ pub fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
-/// A `ClaudeAgentConfig` that runs the sidecar in deterministic mock mode,
-/// persisting its session map to `state_path` so per-channel session
-/// continuity can be asserted across turns.
-pub fn mock_claude_agent_config(state_path: &Path) -> ClaudeAgentConfig {
+pub fn claude_agent_sidecar_config() -> ClaudeAgentConfig {
     let root = repo_root();
     ClaudeAgentConfig {
         command: format!(
-            "RAVEN_CLAUDE_AGENT_MOCK=1 RAVEN_CLAUDE_AGENT_MOCK_STATE={} node {}",
-            shell_quote(&state_path.display().to_string()),
+            "node {}",
             shell_quote(
                 &root
                     .join("scripts/claude-agent-sidecar.mjs")
@@ -57,4 +53,19 @@ pub fn mock_claude_agent_config(state_path: &Path) -> ClaudeAgentConfig {
         max_turns: 4,
         timeout: Duration::from_secs(30),
     }
+}
+
+pub fn claude_agent_without_api_key_config() -> ClaudeAgentConfig {
+    let mut cfg = claude_agent_sidecar_config();
+    let root = repo_root();
+    cfg.command = format!(
+        "env -u ANTHROPIC_API_KEY node {}",
+        shell_quote(
+            &root
+                .join("scripts/claude-agent-sidecar.mjs")
+                .display()
+                .to_string()
+        )
+    );
+    cfg
 }

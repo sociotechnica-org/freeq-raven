@@ -192,9 +192,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mock_sidecar_preserves_channel_session() -> Result<()> {
+    async fn sidecar_requires_anthropic_api_key() -> Result<()> {
         if !node_available() {
-            eprintln!("skipping mock_sidecar_preserves_channel_session: node not available");
+            eprintln!("skipping sidecar_requires_anthropic_api_key: node not available");
             return Ok(());
         }
         let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -202,15 +202,11 @@ mod tests {
             .and_then(|p| p.parent())
             .expect("crate is under repo/crates/freeq-raven")
             .to_path_buf();
-        let mock_state = std::env::temp_dir().join(format!(
-            "freeq-raven-claude-agent-mock-{}.json",
-            std::process::id()
-        ));
+        let sidecar = repo_root.join("scripts/claude-agent-sidecar.mjs");
         let cfg = ClaudeAgentConfig {
             command: format!(
-                "RAVEN_CLAUDE_AGENT_MOCK=1 RAVEN_CLAUDE_AGENT_MOCK_STATE={} node {}",
-                mock_state.display(),
-                repo_root.join("scripts/claude-agent-sidecar.mjs").display()
+                "env -u ANTHROPIC_API_KEY node '{}'",
+                sidecar.display().to_string().replace('\'', "'\\''")
             ),
             workdir: Some(repo_root),
             alexandria_plugin_path: None,
@@ -221,37 +217,25 @@ mod tests {
         };
         let sessions: ClaudeSessionMap =
             std::sync::Arc::new(tokio::sync::Mutex::new(HashMap::new()));
-        let first = ask(
+        let err = ask(
             &cfg,
             &sessions,
             ClaudeAgentTurn {
                 channel: "#alexandria".to_string(),
                 asker: "alice".to_string(),
                 source: "chat".to_string(),
-                question: "Raven, remember that the launch codename is Night Library.".to_string(),
+                question: "Raven, are you connected to Claude?".to_string(),
                 session_context: String::new(),
                 system_prompt: "You are Raven.".to_string(),
             },
         )
-        .await?;
-        assert!(first.session_id.is_some());
-        assert!(first.skills.iter().any(|s| s == "alexandria:ax-start"));
-
-        let second = ask(
-            &cfg,
-            &sessions,
-            ClaudeAgentTurn {
-                channel: "#alexandria".to_string(),
-                asker: "alice".to_string(),
-                source: "chat".to_string(),
-                question: "Raven, what did I ask you to remember?".to_string(),
-                session_context: String::new(),
-                system_prompt: "You are Raven.".to_string(),
-            },
-        )
-        .await?;
-        assert_eq!(first.session_id, second.session_id);
-        assert!(second.text.contains("Night Library"));
+        .await
+        .expect_err("sidecar without ANTHROPIC_API_KEY should fail");
+        assert!(
+            err.to_string()
+                .contains("ANTHROPIC_API_KEY is required for Claude Agent SDK sidecar"),
+            "unexpected error: {err:#}"
+        );
         Ok(())
     }
 }

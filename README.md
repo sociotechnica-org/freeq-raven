@@ -99,7 +99,7 @@ Raven joins `irc.freeq.at` and `#alexandria` by default.
 - Git
 - optional: `tmux` for durable local background runs
 - Node.js for the Claude Agent SDK sidecar
-- authenticated Claude/Anthropic credentials for the Claude Agent SDK
+- `ANTHROPIC_API_KEY` for the Claude Agent SDK sidecar
 - optional: Alexandria installed in the agent workdir
 - API keys for the live AV loop:
   - `ANTHROPIC_API_KEY`
@@ -209,6 +209,9 @@ the target product repository. It should not operate in Alexandria's private
 maintainer repo unless the room explicitly asks Raven to inspect Alexandria
 itself.
 
+When `RAVEN_AGENT_COMMAND` is configured, `ANTHROPIC_API_KEY` is required at
+startup. The sidecar also refuses turns without that key.
+
 Install Alexandria into that target repo with:
 
 ```bash
@@ -241,13 +244,13 @@ unit is for an always-on staging agent.
 make check
 make test
 cargo test -p freeq-raven
-cargo test -p freeq-raven --test e2e_two_servers_test scenario_9_addressed_chat_uses_claude_agent_session -- --nocapture
+cargo test -p freeq-raven --test e2e_two_servers_test scenario_9_claude_agent_without_api_key_fails_loudly -- --nocapture
 cargo test -p freeq-raven --test live_irc_freeq_at_test live_irc_freeq_at_addressed_chat_uses_claude_agent_session -- --ignored --nocapture
 ```
 
 The full e2e tests spin up in-process Freeq servers and can take longer than
 the unit tests. The default `make check` path runs fast compile and identity
-coverage first.
+coverage first. The ignored live IRC test requires a real `ANTHROPIC_API_KEY`.
 
 ## Roadmap
 

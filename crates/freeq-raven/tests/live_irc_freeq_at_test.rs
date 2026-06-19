@@ -17,7 +17,7 @@ use freeq_sdk::event::Event;
 use tokio::sync::mpsc::Receiver;
 
 mod common;
-use common::{mint_identity, mock_claude_agent_config};
+use common::{claude_agent_sidecar_config, mint_identity};
 
 const LIVE_SERVER: &str = "wss://irc.freeq.at/irc";
 const LIVE_CHANNEL: &str = "#alexandria-test";
@@ -173,18 +173,21 @@ fn live_suffix() -> String {
 #[tokio::test]
 #[ignore = "connects to the public irc.freeq.at service"]
 async fn live_irc_freeq_at_addressed_chat_uses_claude_agent_session() -> Result<()> {
+    let _api_key = std::env::var("ANTHROPIC_API_KEY")
+        .ok()
+        .filter(|key| !key.trim().is_empty())
+        .expect("ANTHROPIC_API_KEY is required for the live Claude Agent SDK test");
     let suffix = live_suffix();
     let requested_bot_nick = format!("ravenlive{suffix}");
     let witness_nick = format!("ravenwit{suffix}");
     let marker = format!("Night Library {suffix}");
 
     let mut witness = Witness::join(LIVE_SERVER, &witness_nick, LIVE_CHANNEL).await?;
-    let mock_state = tempfile::NamedTempFile::new().expect("mock sidecar state file");
     let (bot, _bot_tmp) = spawn_live_bot(
         LIVE_SERVER,
         LIVE_CHANNEL,
         &requested_bot_nick,
-        mock_claude_agent_config(mock_state.path()),
+        claude_agent_sidecar_config(),
     );
 
     let actual_bot_nick = witness
@@ -207,7 +210,9 @@ async fn live_irc_freeq_at_addressed_chat_uses_claude_agent_session() -> Result<
     // Raven ignores addressed messages during startup history replay.
     tokio::time::sleep(Duration::from_secs(16)).await;
 
-    let first_turn = format!("{actual_bot_nick}, remember that the launch codename is {marker}.");
+    let first_turn = format!(
+        "{actual_bot_nick}, remember this session marker: {marker}. Reply exactly: remembered {marker}"
+    );
     println!("sending first live turn: {first_turn}");
     witness.handle.privmsg(LIVE_CHANNEL, &first_turn).await?;
 
@@ -226,9 +231,10 @@ async fn live_irc_freeq_at_addressed_chat_uses_claude_agent_session() -> Result<
         .await
         .expect("Raven did not answer first live addressed turn");
     println!("first live reply: {first_reply}");
-    assert!(first_reply.contains("Mock Raven heard"));
+    assert!(first_reply.contains(&marker));
 
-    let second_turn = format!("{actual_bot_nick}, what did I ask you to remember?");
+    let second_turn =
+        format!("{actual_bot_nick}, what is the session marker? Reply with only the marker.");
     println!("sending second live turn: {second_turn}");
     witness.handle.privmsg(LIVE_CHANNEL, &second_turn).await?;
 
@@ -238,7 +244,7 @@ async fn live_irc_freeq_at_addressed_chat_uses_claude_agent_session() -> Result<
                 from, target, text, ..
             } if from.eq_ignore_ascii_case(&actual_bot_nick)
                 && target.eq_ignore_ascii_case(LIVE_CHANNEL)
-                && text.contains("You asked me to remember") =>
+                && text.contains(&marker) =>
             {
                 Some(text.clone())
             }

@@ -116,72 +116,14 @@ function normalizeNames(values) {
     .filter((value) => typeof value === "string" && value.length > 0);
 }
 
-const mockSessions = new Map();
-
-function loadMockSessions() {
-  const statePath = process.env.RAVEN_CLAUDE_AGENT_MOCK_STATE;
-  if (!statePath || !fs.existsSync(statePath)) return mockSessions;
-  try {
-    const parsed = JSON.parse(fs.readFileSync(statePath, "utf8"));
-    mockSessions.clear();
-    for (const [key, value] of Object.entries(parsed.sessions || {})) {
-      mockSessions.set(key, value);
-    }
-  } catch {
-    mockSessions.clear();
+function requireAnthropicApiKey() {
+  if (!process.env.ANTHROPIC_API_KEY || !process.env.ANTHROPIC_API_KEY.trim()) {
+    throw new Error("ANTHROPIC_API_KEY is required for Claude Agent SDK sidecar");
   }
-  return mockSessions;
-}
-
-function saveMockSessions() {
-  const statePath = process.env.RAVEN_CLAUDE_AGENT_MOCK_STATE;
-  if (!statePath) return;
-  fs.mkdirSync(path.dirname(statePath), { recursive: true });
-  fs.writeFileSync(
-    statePath,
-    JSON.stringify({ sessions: Object.fromEntries(mockSessions) }, null, 2),
-  );
-}
-
-async function handleMock(req) {
-  loadMockSessions();
-  const key = req.sessionId || req.channel || "default";
-  const session = mockSessions.get(key) || {
-    id: req.sessionId || `mock-${String(mockSessions.size + 1).padStart(4, "0")}`,
-    memories: [],
-    turns: [],
-  };
-  session.turns.push(req.question || "");
-  const remember = (req.question || "").match(/\bremember(?: that)?\s+(.+?)[.?!]?$/i);
-  if (remember) {
-    session.memories.push(remember[1].trim());
-  }
-  mockSessions.set(session.id, session);
-  if (key !== session.id) mockSessions.set(key, session);
-  saveMockSessions();
-
-  const asksMemory = /\b(what|which).*\bremember\b/i.test(req.question || "");
-  const text = asksMemory
-    ? session.memories.length > 0
-      ? `You asked me to remember: ${session.memories.join("; ")}.`
-      : "I do not have anything remembered yet."
-    : `Mock Raven heard ${req.asker || "someone"}: ${req.question || ""}`;
-
-  return baseResponse(req, {
-    text,
-    sessionId: session.id,
-    plugins: [{ name: "alexandria", path: req.alexandriaPluginPath || "mock://alexandria" }],
-    skills: [
-      "alexandria:ax-start",
-      "alexandria:raven-vision-drafting",
-      "alexandria:demo-thesis",
-    ],
-    slashCommands: ["alexandria:ax-start"],
-    mock: true,
-  });
 }
 
 async function handleReal(req) {
+  requireAnthropicApiKey();
   const { query } = await import("@anthropic-ai/claude-agent-sdk");
   const cwd = path.resolve(req.cwd || process.cwd());
   const pluginPath = discoverAlexandriaPlugin(cwd, req.alexandriaPluginPath);
@@ -256,7 +198,6 @@ async function handleReal(req) {
 }
 
 async function handle(req) {
-  const mock = req.mock === true || process.env.RAVEN_CLAUDE_AGENT_MOCK === "1";
   if (!req || req.type !== "turn") {
     return baseResponse(req || {}, {
       ok: false,
@@ -264,7 +205,7 @@ async function handle(req) {
       text: "",
     });
   }
-  return mock ? handleMock(req) : handleReal(req);
+  return handleReal(req);
 }
 
 async function main() {
