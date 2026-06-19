@@ -117,12 +117,24 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-"$AX2_BIN" start all \
-	--host "$ALEXANDRIA_VIEWER_HOST" \
-	--port "$ALEXANDRIA_VIEWER_PORT" \
-	--no-codex \
-	--json &
-ax2_pid=$!
+set +e
+ax2_output="$(
+	"$AX2_BIN" start all \
+		--host "$ALEXANDRIA_VIEWER_HOST" \
+		--port "$ALEXANDRIA_VIEWER_PORT" \
+		--no-codex \
+		--json 2>&1
+)"
+ax2_status=$?
+set -e
+printf '%s\n' "$ax2_output"
+if [[ "$ax2_status" -ne 0 ]]; then
+	if grep -qi "already running" <<<"$ax2_output"; then
+		echo "Alexandria runtime already running; continuing." >&2
+	else
+		exit "$ax2_status"
+	fi
+fi
 
 "$AX2_BIN" internal host freeq-raven heartbeat \
 	--connection "$ALEXANDRIA_FREEQ_RAVEN_CONNECTION_ID" \
@@ -135,7 +147,7 @@ cd "$ROOT"
 raven_pid=$!
 
 set +e
-wait -n "$ax2_pid" "$heartbeat_pid" "$raven_pid"
+wait -n "$heartbeat_pid" "$raven_pid"
 status=$?
 set -e
 exit "$status"
