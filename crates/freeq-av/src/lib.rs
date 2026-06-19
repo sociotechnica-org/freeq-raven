@@ -19,4 +19,7 @@ pub mod audio;
 pub mod session;
 
 pub use audio::{PcmFrame, PushAudioSource, SPEAK_RATE, Speaker, TapBackend, resample_mono};
-pub use session::{AvConfig, AvParticipant, AvSession, VideoHandle, broadcast_path, path_nick};
+pub use session::{
+    AvConfig, AvParticipant, AvSession, VideoFrameSnapshot, VideoFrameStatus, VideoHandle,
+    broadcast_path, path_nick,
+};

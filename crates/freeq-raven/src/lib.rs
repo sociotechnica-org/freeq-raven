@@ -23,4 +23,5 @@ pub mod video;
 pub mod video_coin;
 pub mod video_particles;
 pub mod vision;
+pub mod vision_bridge;
 pub mod whiteboard;

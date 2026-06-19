@@ -26,6 +26,7 @@ pub struct ClaudeAgentTurn {
     pub question: String,
     pub session_context: String,
     pub system_prompt: String,
+    pub vision_bridge: Option<ClaudeAgentVisionBridge>,
 }
 
 #[derive(Debug, Clone)]
@@ -40,6 +41,24 @@ pub struct ClaudeAgentAnswer {
 pub struct ClaudeAgentPlugin {
     pub name: String,
     pub path: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClaudeAgentVisionBridge {
+    pub endpoint: String,
+    pub bearer_token: String,
+    pub channel: String,
+    pub asker: String,
+    pub participants: Vec<ClaudeAgentVisionParticipant>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClaudeAgentVisionParticipant {
+    pub name: String,
+    pub frame_available: bool,
+    pub frame_stale: bool,
 }
 
 #[derive(Serialize)]
@@ -64,6 +83,8 @@ struct SidecarRequest<'a> {
     model: Option<&'a str>,
     permission_mode: &'a str,
     max_turns: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    vision_bridge: Option<&'a ClaudeAgentVisionBridge>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -112,6 +133,7 @@ pub async fn ask(
         model: cfg.model.as_deref(),
         permission_mode: &cfg.permission_mode,
         max_turns: cfg.max_turns,
+        vision_bridge: turn.vision_bridge.as_ref(),
     };
     let payload = serde_json::to_vec(&req).context("encoding claude agent request")?;
 
@@ -288,6 +310,7 @@ mod tests {
                 question: "Raven, are you connected to Claude?".to_string(),
                 session_context: String::new(),
                 system_prompt: "You are Raven.".to_string(),
+                vision_bridge: None,
             },
         )
         .await

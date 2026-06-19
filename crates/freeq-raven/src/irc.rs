@@ -485,7 +485,7 @@ use crate::imagegen::AiImageConfig;
 use crate::stt::{SttEngine, to_whisper_pcm};
 use crate::video::VideoTile;
 use crate::whiteboard::Step;
-use crate::{claude_agent, imagegen, qa, summary, tts, vision};
+use crate::{claude_agent, imagegen, qa, summary, tts, vision, vision_bridge};
 
 pub struct RunConfig {
     pub server: String,
@@ -617,6 +617,7 @@ pub(crate) struct SharedConfig {
     pub(crate) inception_api_key: Option<String>,
     pub(crate) inception_reasoning_effort: String,
     pub(crate) claude_agent: Option<claude_agent::ClaudeAgentConfig>,
+    pub(crate) vision_bridge: Option<vision_bridge::VisionBridgeHandle>,
     pub(crate) alexandria_wake_command: Option<String>,
     pub(crate) vision_model: String,
     pub(crate) elevenlabs_api_key: Option<String>,
@@ -869,6 +870,15 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
 
     // Reassemble a sharable config without the (already-moved) private
     // key for the inner tasks.
+    let vision_bridge = if claude_agent.is_some() {
+        Some(
+            vision_bridge::VisionBridgeHandle::start()
+                .await
+                .context("starting Raven vision bridge")?,
+        )
+    } else {
+        None
+    };
     let cfg = Arc::new(SharedConfig {
         server,
         channels,
@@ -886,6 +896,7 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
         inception_api_key,
         inception_reasoning_effort,
         claude_agent,
+        vision_bridge,
         alexandria_wake_command,
         vision_model,
         elevenlabs_api_key,
@@ -1041,6 +1052,9 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
                             }
                         };
                         if let Some(call) = replaced_call {
+                            if let Some(bridge) = &cfg.vision_bridge {
+                                bridge.clear_channel(&call.channel);
+                            }
                             let _ = handle_arc
                                 .av_leave(&call.channel, &call.session_id, &call.instance_id)
                                 .await;
@@ -1122,6 +1136,9 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
                         let channel_for_post = channel.clone();
                         let transcript = session_context_snapshot(&cfg, &channel_for_post);
                         clear_session_context(&cfg, &channel_for_post);
+                        if let Some(bridge) = &cfg.vision_bridge {
+                            bridge.clear_channel(&channel_for_post);
+                        }
                         // Drop the active call (tears down MoQ task).
                         drop(call);
                         drop(active_guard);
@@ -1512,12 +1529,49 @@ async fn answer_and_speak(
 
     let mut chunker = qa::SentenceChunker::new();
 
-    // A visual question we can actually see → the vision model with the
-    // asker's latest frame. A visual question with no frame → a useful
-    // hint (otherwise QA answers "I'm a language model"). Anything else
-    // → the normal streaming QA. Completed sentences always go to the
-    // speaker task.
-    let visual = vision::is_visual_question(&question);
+    // Discussion-mode prompt injection. When the human has armed
+    // peer-conversation mode (`discussion_until` in the future),
+    // append an instruction to the system prompt that tells the
+    // LLM to end its answer by inviting one specific peer to
+    // respond — by name, with a comma. The named bot's STT
+    // picks that up, address detection fires, peer answers, and
+    // the chain self-sustains until the discussion window expires.
+    let base_system_prompt = cfg
+        .character_system_prompt
+        .clone()
+        .unwrap_or_else(|| qa::default_system_prompt().to_string());
+    let effective_system_prompt = if is_discussion_mode_active(&cfg) && !cfg.peer_agents.is_empty()
+    {
+        // Build a peer list excluding ourselves so the bot
+        // does not accidentally address itself.
+        let self_canonical = cfg
+            .nick
+            .split_once('-')
+            .map(|(p, _)| p)
+            .unwrap_or(cfg.nick.as_str())
+            .to_ascii_lowercase();
+        let peers: Vec<&str> = cfg
+            .peer_agents
+            .iter()
+            .filter(|p| **p != self_canonical)
+            .map(|s| s.as_str())
+            .collect();
+        let peer_list = peers.join(", ");
+        format!(
+            "{base_system_prompt}\n\nDISCUSSION MODE IS ACTIVE. After your answer \
+(1-2 sentences max), end with a one-sentence direct address to ONE specific \
+peer by name (\"{peer_list}\") inviting their response. Format: \"<Name>, \
+<one-line follow-up question>.\" Pick the peer whose viewpoint would most \
+sharpen the thread. Do NOT address yourself."
+        )
+    } else {
+        base_system_prompt
+    };
+
+    // When Claude Agent SDK is configured, Claude owns intent
+    // classification. The local visual cue list is legacy-only.
+    let agent_cfg = cfg.claude_agent.as_ref();
+    let visual = agent_cfg.is_none() && vision::is_visual_question(&question);
     let frame = if visual {
         asker_video.as_ref().and_then(|vh| vh.latest())
     } else {
@@ -1529,7 +1583,7 @@ async fn answer_and_speak(
     // tile draws them stroke-by-stroke as she speaks; for everything
     // else it returns no steps and we fall through to the scene card.
     // Vision-branch questions get the camera PiP instead, no board.
-    let whiteboard_task: Option<JoinHandle<Option<Vec<Step>>>> = if !visual {
+    let whiteboard_task: Option<JoinHandle<Option<Vec<Step>>>> = if agent_cfg.is_none() && !visual {
         if let Some(api_key) = cfg.groq_api_key.clone() {
             let http = cfg.http.clone();
             let model = cfg.groq_chat_model.clone();
@@ -1544,7 +1598,57 @@ async fn answer_and_speak(
         None
     };
 
-    let result: Result<qa::Answer> = if let Some(frame) = frame {
+    let result: Result<qa::Answer> = if let Some(agent_cfg) = agent_cfg {
+        tracing::info!(%asker, %turn_source, "answering with claude agent sidecar");
+        let turn_lock = claude_turn_lock(&cfg.claude_turn_locks, &channel).await;
+        let _turn_guard = match turn_lock.try_lock() {
+            Ok(guard) => guard,
+            Err(_) => {
+                tracing::info!(%channel, "queueing claude agent sidecar turn behind in-flight channel turn");
+                turn_lock.lock().await
+            }
+        };
+        let vision_bridge = cfg
+            .vision_bridge
+            .as_ref()
+            .map(|bridge| bridge.sidecar_descriptor(&channel, &asker));
+        claude_agent::ask(
+            agent_cfg,
+            &cfg.claude_sessions,
+            claude_agent::ClaudeAgentTurn {
+                channel: channel.clone(),
+                asker: asker.clone(),
+                source: turn_source.to_string(),
+                question: question.clone(),
+                session_context: transcript.clone(),
+                system_prompt: effective_system_prompt.clone(),
+                vision_bridge,
+            },
+        )
+        .await
+        .map(|answer| {
+            if let Some(session_id) = &answer.session_id {
+                tracing::info!(%session_id, "claude agent session resumed");
+            }
+            if !answer.plugins.is_empty() {
+                tracing::info!(plugins = ?answer.plugins, "claude agent plugins loaded");
+            }
+            if !answer.skills.is_empty() {
+                tracing::info!(
+                    count = answer.skills.len(),
+                    skills = ?answer.skills,
+                    "claude agent skills loaded"
+                );
+            }
+            for sentence in chunker.push(&answer.text) {
+                let _ = tx.send(sentence);
+            }
+            qa::Answer {
+                text: answer.text,
+                source: None,
+            }
+        })
+    } else if let Some(frame) = frame {
         tracing::info!("answering as a visual question");
         if let Some(key) = cfg.groq_api_key.as_deref() {
             match vision::frame_to_jpeg_data_uri(&frame) {
@@ -1581,163 +1685,77 @@ async fn answer_and_speak(
         }
         Ok(qa::Answer { text, source: None })
     } else {
-        // Discussion-mode prompt injection. When the human has armed
-        // peer-conversation mode (`discussion_until` in the future),
-        // append an instruction to the system prompt that tells the
-        // LLM to end its answer by inviting one specific peer to
-        // respond — by name, with a comma. The named bot's STT
-        // picks that up, address detection fires, peer answers, and
-        // the chain self-sustains until the discussion window expires.
-        let base_system_prompt = cfg
-            .character_system_prompt
-            .clone()
-            .unwrap_or_else(|| qa::default_system_prompt().to_string());
-        let effective_system_prompt =
-            if is_discussion_mode_active(&cfg) && !cfg.peer_agents.is_empty() {
-                // Build a peer list excluding ourselves so the bot
-                // does not accidentally address itself.
-                let self_canonical = cfg
-                    .nick
-                    .split_once('-')
-                    .map(|(p, _)| p)
-                    .unwrap_or(cfg.nick.as_str())
-                    .to_ascii_lowercase();
-                let peers: Vec<&str> = cfg
-                    .peer_agents
-                    .iter()
-                    .filter(|p| **p != self_canonical)
-                    .map(|s| s.as_str())
-                    .collect();
-                let peer_list = peers.join(", ");
-                format!(
-                    "{base_system_prompt}\n\nDISCUSSION MODE IS ACTIVE. After your answer \
-(1-2 sentences max), end with a one-sentence direct address to ONE specific \
-peer by name (\"{peer_list}\") inviting their response. Format: \"<Name>, \
-<one-line follow-up question>.\" Pick the peer whose viewpoint would most \
-sharpen the thread. Do NOT address yourself."
-                )
-            } else {
-                base_system_prompt
-            };
-
-        if let Some(agent_cfg) = cfg.claude_agent.as_ref() {
-            tracing::info!(%asker, %turn_source, "answering with claude agent sidecar");
-            let turn_lock = claude_turn_lock(&cfg.claude_turn_locks, &channel).await;
-            let _turn_guard = match turn_lock.try_lock() {
-                Ok(guard) => guard,
-                Err(_) => {
-                    tracing::info!(%channel, "queueing claude agent sidecar turn behind in-flight channel turn");
-                    turn_lock.lock().await
+        // Dispatch per configured answer provider. The provider choice
+        // controls only the hot conversational answer path; Groq may
+        // still be used separately for STT, vision, and visual cards.
+        match configured_answer_provider(&cfg) {
+            AnswerProvider::Anthropic => match cfg.anthropic_key.as_deref() {
+                Some(akey) => {
+                    qa::anthropic_answer_streaming(
+                        &cfg.http,
+                        akey,
+                        &cfg.groq_answer_model,
+                        &transcript,
+                        &question,
+                        Some(effective_system_prompt.as_str()),
+                        |delta| {
+                            for sentence in chunker.push(delta) {
+                                let _ = tx.send(sentence);
+                            }
+                        },
+                    )
+                    .await
                 }
-            };
-            claude_agent::ask(
-                agent_cfg,
-                &cfg.claude_sessions,
-                claude_agent::ClaudeAgentTurn {
-                    channel: channel.clone(),
-                    asker: asker.clone(),
-                    source: turn_source.to_string(),
-                    question: question.clone(),
-                    session_context: transcript.clone(),
-                    system_prompt: effective_system_prompt,
-                },
-            )
-            .await
-            .map(|answer| {
-                if let Some(session_id) = &answer.session_id {
-                    tracing::info!(%session_id, "claude agent session resumed");
+                None => Err(anyhow::anyhow!(
+                    "model {} requires ANTHROPIC_API_KEY",
+                    cfg.groq_answer_model
+                )),
+            },
+            AnswerProvider::Groq => match cfg.groq_api_key.as_deref() {
+                Some(groq_key) => {
+                    qa::answer_streaming(
+                        &cfg.http,
+                        groq_key,
+                        &cfg.groq_answer_model,
+                        &transcript,
+                        &question,
+                        Some(effective_system_prompt.as_str()),
+                        |delta| {
+                            for sentence in chunker.push(delta) {
+                                let _ = tx.send(sentence);
+                            }
+                        },
+                    )
+                    .await
                 }
-                if !answer.plugins.is_empty() {
-                    tracing::info!(plugins = ?answer.plugins, "claude agent plugins loaded");
+                None => Err(anyhow::anyhow!(
+                    "model {} requires GROQ_API_KEY",
+                    cfg.groq_answer_model
+                )),
+            },
+            AnswerProvider::Inception => match cfg.inception_api_key.as_deref() {
+                Some(inception_key) => {
+                    qa::inception_answer_streaming(
+                        &cfg.http,
+                        inception_key,
+                        &cfg.groq_answer_model,
+                        &cfg.inception_reasoning_effort,
+                        &transcript,
+                        &question,
+                        Some(effective_system_prompt.as_str()),
+                        |delta| {
+                            for sentence in chunker.push(delta) {
+                                let _ = tx.send(sentence);
+                            }
+                        },
+                    )
+                    .await
                 }
-                if !answer.skills.is_empty() {
-                    tracing::info!(
-                        count = answer.skills.len(),
-                        skills = ?answer.skills,
-                        "claude agent skills loaded"
-                    );
-                }
-                for sentence in chunker.push(&answer.text) {
-                    let _ = tx.send(sentence);
-                }
-                qa::Answer {
-                    text: answer.text,
-                    source: None,
-                }
-            })
-        } else {
-            // Dispatch per configured answer provider. The provider choice
-            // controls only the hot conversational answer path; Groq may
-            // still be used separately for STT, vision, and visual cards.
-            match configured_answer_provider(&cfg) {
-                AnswerProvider::Anthropic => match cfg.anthropic_key.as_deref() {
-                    Some(akey) => {
-                        qa::anthropic_answer_streaming(
-                            &cfg.http,
-                            akey,
-                            &cfg.groq_answer_model,
-                            &transcript,
-                            &question,
-                            Some(effective_system_prompt.as_str()),
-                            |delta| {
-                                for sentence in chunker.push(delta) {
-                                    let _ = tx.send(sentence);
-                                }
-                            },
-                        )
-                        .await
-                    }
-                    None => Err(anyhow::anyhow!(
-                        "model {} requires ANTHROPIC_API_KEY",
-                        cfg.groq_answer_model
-                    )),
-                },
-                AnswerProvider::Groq => match cfg.groq_api_key.as_deref() {
-                    Some(groq_key) => {
-                        qa::answer_streaming(
-                            &cfg.http,
-                            groq_key,
-                            &cfg.groq_answer_model,
-                            &transcript,
-                            &question,
-                            Some(effective_system_prompt.as_str()),
-                            |delta| {
-                                for sentence in chunker.push(delta) {
-                                    let _ = tx.send(sentence);
-                                }
-                            },
-                        )
-                        .await
-                    }
-                    None => Err(anyhow::anyhow!(
-                        "model {} requires GROQ_API_KEY",
-                        cfg.groq_answer_model
-                    )),
-                },
-                AnswerProvider::Inception => match cfg.inception_api_key.as_deref() {
-                    Some(inception_key) => {
-                        qa::inception_answer_streaming(
-                            &cfg.http,
-                            inception_key,
-                            &cfg.groq_answer_model,
-                            &cfg.inception_reasoning_effort,
-                            &transcript,
-                            &question,
-                            Some(effective_system_prompt.as_str()),
-                            |delta| {
-                                for sentence in chunker.push(delta) {
-                                    let _ = tx.send(sentence);
-                                }
-                            },
-                        )
-                        .await
-                    }
-                    None => Err(anyhow::anyhow!(
-                        "model {} requires INCEPTION_API_KEY",
-                        cfg.groq_answer_model
-                    )),
-                },
-            }
+                None => Err(anyhow::anyhow!(
+                    "model {} requires INCEPTION_API_KEY",
+                    cfg.groq_answer_model
+                )),
+            },
         }
     };
 
@@ -2428,6 +2446,9 @@ async fn start_transcription(
         our_broadcast: broadcast_path(&session_id, &cfg.nick, &instance_id),
         my_nick: cfg.nick.clone(),
     };
+    if let Some(bridge) = &cfg.vision_bridge {
+        bridge.activate_channel(&channel);
+    }
 
     // Dispatcher task: own the AvSession and spawn one transcription
     // task per participant it taps. The transcription tasks live in a
@@ -2536,6 +2557,19 @@ const ANSWER_DEBOUNCE: Duration = Duration::from_secs(8);
 /// "monologue" of stale messages. Live questions come after the burst.
 const STARTUP_GRACE: Duration = Duration::from_secs(15);
 
+struct VisionParticipantGuard {
+    bridge: vision_bridge::VisionBridgeHandle,
+    channel: String,
+    participant: String,
+}
+
+impl Drop for VisionParticipantGuard {
+    fn drop(&mut self) {
+        self.bridge
+            .remove_participant(&self.channel, &self.participant);
+    }
+}
+
 /// Consume one participant's decoded-PCM stream (from an [`AvSession`])
 /// and segment it into utterances by voice activity — accumulate while
 /// the speaker is talking, flush to STT on a natural pause. This kills
@@ -2560,6 +2594,14 @@ async fn transcribe_participant(
     } = participant;
     let stt = cfg.stt.clone();
     tracing::info!(%nick, %path, "participant audio live — transcribing");
+    let _vision_participant = cfg.vision_bridge.as_ref().map(|bridge| {
+        bridge.register_participant(&channel, &nick, video.clone());
+        VisionParticipantGuard {
+            bridge: bridge.clone(),
+            channel: channel.clone(),
+            participant: nick.clone(),
+        }
+    });
 
     // VAD: turn the PCM stream into utterances, cut at natural pauses.
     let mut segmenter = VadSegmenter::new(VadConfig::default());
