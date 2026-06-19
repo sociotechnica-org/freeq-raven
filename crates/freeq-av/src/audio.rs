@@ -491,7 +491,7 @@ mod tests {
                 f32::MAX,
                 f32::MIN,
                 1.0e-30,
-                -3.14159265,
+                -std::f32::consts::PI,
             ];
             sink.push_samples(&payload).unwrap();
             let frame = rx.recv().await.expect("frame not delivered");
