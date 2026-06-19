@@ -105,6 +105,9 @@ fi
 "$AX2_BIN" inspect state --json >/tmp/ax2-state.json
 
 cleanup() {
+	if [[ -n "${ax2_log_tail_pid:-}" ]]; then
+		kill "$ax2_log_tail_pid" 2>/dev/null || true
+	fi
 	if [[ -n "${ax2_pid:-}" ]]; then
 		kill "$ax2_pid" 2>/dev/null || true
 	fi
@@ -116,6 +119,41 @@ cleanup() {
 	fi
 }
 trap cleanup EXIT INT TERM
+
+start_ax2_runtime() {
+	local ax2_log
+	local ax2_status
+
+	ax2_log="$(mktemp /tmp/freeq-raven-ax2.XXXXXX.log)"
+	"$AX2_BIN" start all \
+		--host "$ALEXANDRIA_VIEWER_HOST" \
+		--port "$ALEXANDRIA_VIEWER_PORT" \
+		--no-codex \
+		--json >"$ax2_log" 2>&1 &
+	ax2_pid=$!
+
+	sleep 1
+	if ! kill -0 "$ax2_pid" 2>/dev/null; then
+		set +e
+		wait "$ax2_pid"
+		ax2_status=$?
+		set -e
+		ax2_pid=""
+		cat "$ax2_log"
+
+		if [[ "$ax2_status" -ne 0 ]]; then
+			if grep -qi "already running" "$ax2_log"; then
+				echo "Alexandria runtime already running; continuing." >&2
+			else
+				exit "$ax2_status"
+			fi
+		fi
+	else
+		cat "$ax2_log"
+		tail -n 0 -f "$ax2_log" &
+		ax2_log_tail_pid=$!
+	fi
+}
 
 wait_for_first_exit() {
 	local pid
@@ -131,24 +169,7 @@ wait_for_first_exit() {
 	done
 }
 
-set +e
-ax2_output="$(
-	"$AX2_BIN" start all \
-		--host "$ALEXANDRIA_VIEWER_HOST" \
-		--port "$ALEXANDRIA_VIEWER_PORT" \
-		--no-codex \
-		--json 2>&1
-)"
-ax2_status=$?
-set -e
-printf '%s\n' "$ax2_output"
-if [[ "$ax2_status" -ne 0 ]]; then
-	if grep -qi "already running" <<<"$ax2_output"; then
-		echo "Alexandria runtime already running; continuing." >&2
-	else
-		exit "$ax2_status"
-	fi
-fi
+start_ax2_runtime
 
 "$AX2_BIN" internal host freeq-raven heartbeat \
 	--connection "$ALEXANDRIA_FREEQ_RAVEN_CONNECTION_ID" \
@@ -160,8 +181,14 @@ cd "$ROOT"
 "$ROOT/bin/freeq-raven" &
 raven_pid=$!
 
+wait_pids=()
+if [[ -n "${ax2_pid:-}" ]]; then
+	wait_pids+=("$ax2_pid")
+fi
+wait_pids+=("$heartbeat_pid" "$raven_pid")
+
 set +e
-wait_for_first_exit "$heartbeat_pid" "$raven_pid"
+wait_for_first_exit "${wait_pids[@]}"
 status=$?
 set -e
 exit "$status"

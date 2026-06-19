@@ -37,8 +37,9 @@ mkdir -p "$TMP_ROOT/source" "$TMP_ROOT/stub-bin" "$TMP_ROOT/host/bin" "$TMP_ROOT
 
 cp "$ROOT/bin/freeq-raven-railway" "$TMP_ROOT/host/bin/freeq-raven-railway"
 
-cat >"$TMP_ROOT/host/bin/freeq-raven" <<'SH'
+cat >"$TMP_ROOT/host/bin/freeq-raven" <<SH
 #!/bin/sh
+printf started > "$TMP_ROOT/raven.started"
 sleep 0.2
 SH
 chmod +x "$TMP_ROOT/host/bin/freeq-raven"
@@ -73,10 +74,10 @@ case "\${1:-}" in
     printf '{}\n'
     ;;
   start)
-    sleep 0.1
+    sleep 5
     ;;
   internal)
-    sleep 0.1
+    sleep 5
     ;;
 esac
 SH
@@ -98,7 +99,24 @@ PATH="$TMP_ROOT/stub-bin:$PATH" \
 	ALEXANDRIA_AX2_INSTALL_DIR="$TMP_ROOT/axbin" \
 	ALEXANDRIA_NEXT_ACP_PROVIDER="claude" \
 	ALEXANDRIA_NEXT_WORKSPACE="$TMP_ROOT/data/workspaces/alexandria-wedo" \
-	/bin/bash "$TMP_ROOT/host/bin/freeq-raven-railway"
+	/bin/bash "$TMP_ROOT/host/bin/freeq-raven-railway" &
+wrapper_pid=$!
+
+for _ in $(seq 1 30); do
+	if [ -f "$TMP_ROOT/raven.started" ]; then
+		break
+	fi
+	sleep 0.1
+done
+
+if [ ! -f "$TMP_ROOT/raven.started" ]; then
+	kill "$wrapper_pid" 2>/dev/null || true
+	wait "$wrapper_pid" 2>/dev/null || true
+	echo "Expected freeq-raven to launch while ax start all is still running" >&2
+	exit 1
+fi
+
+wait "$wrapper_pid"
 
 assert_contains "--yes" "$TMP_ROOT/install.args"
 assert_contains "--acp-provider" "$TMP_ROOT/install.args"
