@@ -134,21 +134,8 @@ cd "$ROOT"
 "$ROOT/bin/freeq-raven" &
 raven_pid=$!
 
-while true; do
-	if ! kill -0 "$ax2_pid" 2>/dev/null; then
-		wait "$ax2_pid"
-		exit $?
-	fi
-
-	if ! kill -0 "$heartbeat_pid" 2>/dev/null; then
-		wait "$heartbeat_pid"
-		exit $?
-	fi
-
-	if ! kill -0 "$raven_pid" 2>/dev/null; then
-		wait "$raven_pid"
-		exit $?
-	fi
-
-	sleep 1
-done
+set +e
+wait -n "$ax2_pid" "$heartbeat_pid" "$raven_pid"
+status=$?
+set -e
+exit "$status"
