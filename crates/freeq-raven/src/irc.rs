@@ -175,9 +175,21 @@ fn missing_answer_config(cfg: &SharedConfig) -> Option<String> {
 /// transcript + summary are complete.
 const SESSION_CONTEXT_QA_TAIL_LINES: usize = 200;
 const WAKE_FOLLOWUP_WINDOW: Duration = Duration::from_secs(15 * 60);
+const TYPING_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(5);
+
+type ClaudeTurnLocks = Arc<AsyncMutex<HashMap<String, Arc<AsyncMutex<()>>>>>;
 
 fn record_session_line(cfg: &SharedConfig, channel: &str, source: &str, speaker: &str, text: &str) {
     record_session_line_inner(cfg, channel, source, speaker, text, None);
+}
+
+async fn claude_turn_lock(locks: &ClaudeTurnLocks, channel: &str) -> Arc<AsyncMutex<()>> {
+    let key = channel.to_ascii_lowercase();
+    let mut guard = locks.lock().await;
+    guard
+        .entry(key)
+        .or_insert_with(|| Arc::new(AsyncMutex::new(())))
+        .clone()
 }
 
 fn record_session_line_bounded(
@@ -673,6 +685,10 @@ pub(crate) struct SharedConfig {
     /// The sidecar resumes these sessions on follow-up turns, giving the
     /// room one long-running Claude session per channel.
     pub(crate) claude_sessions: claude_agent::ClaudeSessionMap,
+    /// Per-channel gate for Claude Agent SDK sidecar turns. A channel has
+    /// one ordered Claude session; overlapping addressed turns must queue
+    /// behind the in-flight turn so follow-ups resume the right session.
+    pub(crate) claude_turn_locks: ClaudeTurnLocks,
     /// Channels with a recent external wake. While active, the next
     /// room replies are routed into the agent session even if the
     /// human does not explicitly address Raven.
@@ -894,6 +910,7 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
         claude_sessions: std::sync::Arc::new(tokio::sync::Mutex::new(
             std::collections::HashMap::new(),
         )),
+        claude_turn_locks: Arc::new(AsyncMutex::new(HashMap::new())),
         wake_followups_until: std::sync::Arc::new(std::sync::Mutex::new(
             std::collections::HashMap::new(),
         )),
@@ -1381,6 +1398,9 @@ async fn answer_and_speak(
     retain_full_session_context: bool,
 ) {
     let typed_chat = speaker.is_none();
+    let _typing_keepalive = TypingKeepaliveGuard(
+        typed_chat.then(|| spawn_typing_keepalive(handle.clone(), channel.clone())),
+    );
     if let Some(reason) = missing_answer_config(&cfg) {
         if typed_chat {
             send_typing_stop(&handle, &channel).await;
@@ -1602,6 +1622,14 @@ sharpen the thread. Do NOT address yourself."
 
         if let Some(agent_cfg) = cfg.claude_agent.as_ref() {
             tracing::info!(%asker, %turn_source, "answering with claude agent sidecar");
+            let turn_lock = claude_turn_lock(&cfg.claude_turn_locks, &channel).await;
+            let _turn_guard = match turn_lock.try_lock() {
+                Ok(guard) => guard,
+                Err(_) => {
+                    tracing::info!(%channel, "queueing claude agent sidecar turn behind in-flight channel turn");
+                    turn_lock.lock().await
+                }
+            };
             claude_agent::ask(
                 agent_cfg,
                 &cfg.claude_sessions,
@@ -3072,6 +3100,25 @@ async fn send_typing_stop(handle: &ClientHandle, channel: &str) {
     }
 }
 
+fn spawn_typing_keepalive(handle: Arc<ClientHandle>, channel: String) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(TYPING_KEEPALIVE_INTERVAL).await;
+            send_typing_start(&handle, &channel).await;
+        }
+    })
+}
+
+struct TypingKeepaliveGuard(Option<JoinHandle<()>>);
+
+impl Drop for TypingKeepaliveGuard {
+    fn drop(&mut self) {
+        if let Some(task) = self.0.take() {
+            task.abort();
+        }
+    }
+}
+
 // Silence the unused-fields lint on ActiveCall — we keep the fields
 // even though only `transcript` and `_moq_task` are read by code.
 // (`channel`/`session_id`/`instance_id` are useful for diagnostics
@@ -3112,6 +3159,40 @@ mod tests {
                 .all(|chunk| chunk.chars().count() <= CHAT_POST_MAX_CHARS)
         );
         assert_eq!(chunks.join(" "), text.trim());
+    }
+
+    #[tokio::test]
+    async fn claude_turn_lock_serializes_same_channel() {
+        let locks: ClaudeTurnLocks = Arc::new(AsyncMutex::new(HashMap::new()));
+        let first = claude_turn_lock(&locks, "#Alexandria").await;
+        let same = claude_turn_lock(&locks, "#alexandria").await;
+        let other = claude_turn_lock(&locks, "#elsewhere").await;
+
+        assert!(Arc::ptr_eq(&first, &same));
+        assert!(!Arc::ptr_eq(&first, &other));
+
+        let first_guard = first.lock().await;
+        let (tx, mut rx) = mpsc::channel(1);
+        let task = tokio::spawn(async move {
+            let _same_channel_guard = same.lock().await;
+            tx.send(()).await.expect("receiver alive");
+        });
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), rx.recv())
+                .await
+                .is_err(),
+            "same-channel turn should wait behind the in-flight turn",
+        );
+
+        drop(first_guard);
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), rx.recv())
+                .await
+                .expect("same-channel turn should proceed")
+                .is_some()
+        );
+        task.await.expect("lock waiter task should finish");
     }
 
     #[test]

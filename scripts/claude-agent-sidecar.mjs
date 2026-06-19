@@ -163,7 +163,7 @@ async function handleReal(req) {
 
   const options = {
     cwd,
-    maxTurns: req.maxTurns ?? 8,
+    maxTurns: req.maxTurns ?? 24,
     model: req.model || process.env.RAVEN_AGENT_MODEL || undefined,
     allowedTools: req.allowedTools || DEFAULT_ALLOWED_TOOLS,
     permissionMode: req.permissionMode || process.env.RAVEN_AGENT_PERMISSION_MODE || "dontAsk",

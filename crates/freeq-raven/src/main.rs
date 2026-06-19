@@ -155,11 +155,11 @@ struct Cli {
     agent_permission_mode: String,
 
     /// Max agentic turns per addressed room turn.
-    #[arg(long, env = "RAVEN_AGENT_MAX_TURNS", default_value_t = 8)]
+    #[arg(long, env = "RAVEN_AGENT_MAX_TURNS", default_value_t = 24)]
     agent_max_turns: u32,
 
     /// Timeout in seconds for one Claude Agent SDK sidecar turn.
-    #[arg(long, env = "RAVEN_AGENT_TIMEOUT_SECS", default_value_t = 300)]
+    #[arg(long, env = "RAVEN_AGENT_TIMEOUT_SECS", default_value_t = 900)]
     agent_timeout_secs: u64,
 
     /// External command that emits one Alexandria wake JSON line on stdout.
