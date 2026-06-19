@@ -393,7 +393,6 @@ Usually do not use tools for this wake turn. If it needs the director's \
 reaction, ask conversationally in the room and stop. If it reports \
 completion or failure, tell the room what happened."
     );
-    send_typing_start(&handle, channel).await;
     let transcript = session_context_tail(&cfg, channel, SESSION_CONTEXT_QA_TAIL_LINES);
     answer_and_speak(
         cfg.clone(),
@@ -405,6 +404,7 @@ completion or failure, tell the room what happened."
         None,
         None,
         None,
+        false,
         false,
     )
     .await;
@@ -1280,9 +1280,6 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
                     && wake_followup_active(&cfg, &target)
                     && !from.eq_ignore_ascii_case(&cfg.nick)
                     && !is_peer_nick(&cfg.peer_agents, &from);
-                if addressed_question.is_some() || wake_followup {
-                    send_typing_start(&handle_arc, &target).await;
-                }
                 let retain_full_session_context = active
                     .lock()
                     .await
@@ -1304,14 +1301,15 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
                     wake_followup.then(|| {
                         format!(
                             "Room reply after an Alexandria wake from {from}: {text}\n\n\
-Treat this as the director's response to your last wake-driven room ask \
-if it clearly answers it. Use the `fabroRunId` and `questionId` from the \
-last wake in the session context. If this is clear approval and the wake \
-choices included `A`, call `ax raven answer --run <fabroRunId> --question \
-<questionId> --select A`; otherwise call `ax raven answer --run \
-<fabroRunId> --question <questionId> --text <reply>`. Do not require \
-exact phrases. After the command succeeds, briefly tell the room you sent \
-it back to the play."
+This is only a candidate follow-up. If it is unrelated to the latest \
+Alexandria wake, stale, already handled, or needs no public reply, ignore it \
+silently. If it clearly answers the wake, use the `fabroRunId` and \
+`questionId` from the last wake in the session context. If this is clear \
+approval and the wake choices included `A`, call `ax raven answer --run \
+<fabroRunId> --question <questionId> --select A`; otherwise call `ax raven \
+answer --run <fabroRunId> --question <questionId> --text <reply>`. Do not \
+require exact phrases. After any command succeeds, only reply publicly if the \
+room actually needs to hear the update."
                         )
                     })
                 }) else {
@@ -1322,7 +1320,6 @@ it back to the play."
                 // predate the bot and aren't being asked of it now.
                 if cfg.started_at.elapsed() < STARTUP_GRACE {
                     tracing::info!(%from, "ignoring addressed chat message (startup grace)");
-                    send_typing_stop(&handle_arc, &target).await;
                     continue;
                 }
                 // Multi-agent chatter guard: if the last several
@@ -1334,11 +1331,9 @@ it back to the play."
                         %from,
                         "suppressing chat reply — recent addressers all peer agents (waiting for a human)"
                     );
-                    send_typing_stop(&handle_arc, &target).await;
                     continue;
                 }
                 if let Some(reason) = missing_answer_config(&cfg) {
-                    send_typing_stop(&handle_arc, &target).await;
                     let _ = handle_arc
                         .privmsg(&target, &format!("{from}: {reason}"))
                         .await;
@@ -1364,11 +1359,9 @@ it back to the play."
                         None,
                         None,
                         retain_full_session_context,
+                        wake_followup,
                     )
                     .await;
-                    if wake_followup {
-                        arm_wake_followup(&cfg, &channel);
-                    }
                 });
             }
             Event::Disconnected { reason } => {
@@ -1396,13 +1389,12 @@ async fn answer_and_speak(
     // The asker's own video (their screen/camera), for visual questions.
     asker_video: Option<VideoHandle>,
     retain_full_session_context: bool,
+    silent_allowed: bool,
 ) {
     let typed_chat = speaker.is_none();
-    let _typing_keepalive = TypingKeepaliveGuard(
-        typed_chat.then(|| spawn_typing_keepalive(handle.clone(), channel.clone())),
-    );
+    let mut typing_keepalive = TypingKeepaliveGuard(None);
     if let Some(reason) = missing_answer_config(&cfg) {
-        if typed_chat {
+        if typing_keepalive.is_active() {
             send_typing_stop(&handle, &channel).await;
         }
         let _ = handle
@@ -1529,7 +1521,7 @@ async fn answer_and_speak(
     // tile draws them stroke-by-stroke as she speaks; for everything
     // else it returns no steps and we fall through to the scene card.
     // Vision-branch questions get the camera PiP instead, no board.
-    let whiteboard_task: Option<JoinHandle<Option<Vec<Step>>>> = if !visual {
+    let whiteboard_task: Option<JoinHandle<Option<Vec<Step>>>> = if !visual && !silent_allowed {
         if let Some(api_key) = cfg.groq_api_key.clone() {
             let http = cfg.http.clone();
             let model = cfg.groq_chat_model.clone();
@@ -1546,6 +1538,9 @@ async fn answer_and_speak(
 
     let result: Result<qa::Answer> = if let Some(frame) = frame {
         tracing::info!("answering as a visual question");
+        if typed_chat {
+            typing_keepalive.start(&handle, &channel).await;
+        }
         if let Some(key) = cfg.groq_api_key.as_deref() {
             match vision::frame_to_jpeg_data_uri(&frame) {
                 Ok(uri) => {
@@ -1575,6 +1570,9 @@ async fn answer_and_speak(
         }
     } else if visual {
         tracing::info!("visual question but no video frame from asker");
+        if typed_chat {
+            typing_keepalive.start(&handle, &channel).await;
+        }
         let text = "I can't see anything right now — turn on your camera or share your screen, then ask again.".to_string();
         for sentence in chunker.push(&text) {
             let _ = tx.send(sentence);
@@ -1630,6 +1628,9 @@ sharpen the thread. Do NOT address yourself."
                     turn_lock.lock().await
                 }
             };
+            if typed_chat && !silent_allowed {
+                typing_keepalive.start(&handle, &channel).await;
+            }
             claude_agent::ask(
                 agent_cfg,
                 &cfg.claude_sessions,
@@ -1640,6 +1641,7 @@ sharpen the thread. Do NOT address yourself."
                     question: question.clone(),
                     session_context: transcript.clone(),
                     system_prompt: effective_system_prompt,
+                    silent_allowed,
                 },
             )
             .await
@@ -1657,6 +1659,13 @@ sharpen the thread. Do NOT address yourself."
                         "claude agent skills loaded"
                     );
                 }
+                if answer.action == claude_agent::ClaudeAgentAction::Ignore {
+                    tracing::info!(%asker, "claude agent ignored candidate turn");
+                    return qa::Answer {
+                        text: String::new(),
+                        source: None,
+                    };
+                }
                 for sentence in chunker.push(&answer.text) {
                     let _ = tx.send(sentence);
                 }
@@ -1666,6 +1675,9 @@ sharpen the thread. Do NOT address yourself."
                 }
             })
         } else {
+            if typed_chat {
+                typing_keepalive.start(&handle, &channel).await;
+            }
             // Dispatch per configured answer provider. The provider choice
             // controls only the hot conversational answer path; Groq may
             // still be used separately for STT, vision, and visual cards.
@@ -1749,8 +1761,11 @@ sharpen the thread. Do NOT address yourself."
             if let Some(t) = speak_task {
                 let _ = t.await;
             }
-            if typed_chat {
+            if typing_keepalive.is_active() {
                 send_typing_stop(&handle, &channel).await;
+            }
+            if silent_allowed {
+                return;
             }
             let _ = handle
                 .privmsg(
@@ -1762,6 +1777,17 @@ sharpen the thread. Do NOT address yourself."
         }
     };
 
+    if answer.text.trim().is_empty() {
+        drop(tx);
+        if let Some(t) = speak_task {
+            let _ = t.await;
+        }
+        if typing_keepalive.is_active() {
+            send_typing_stop(&handle, &channel).await;
+        }
+        return;
+    }
+
     // The final sentence has no trailing whitespace to flush it mid-stream.
     if let Some(last) = chunker.flush() {
         let _ = tx.send(last);
@@ -1770,7 +1796,7 @@ sharpen the thread. Do NOT address yourself."
     // Log the full answer text — invaluable for debugging when she's
     // saying something weird (e.g. reading image alt attributes).
     tracing::info!(text = %answer.text, "answer text (sent to TTS)");
-    if typed_chat {
+    if typing_keepalive.is_active() {
         send_typing_stop(&handle, &channel).await;
     }
     if retain_full_session_context {
@@ -2777,6 +2803,7 @@ async fn transcribe_participant(
                                 Some(video),
                                 Some(asker_video),
                                 true,
+                                false,
                             )
                             .await;
                         }
@@ -3110,6 +3137,19 @@ fn spawn_typing_keepalive(handle: Arc<ClientHandle>, channel: String) -> JoinHan
 }
 
 struct TypingKeepaliveGuard(Option<JoinHandle<()>>);
+
+impl TypingKeepaliveGuard {
+    fn is_active(&self) -> bool {
+        self.0.is_some()
+    }
+
+    async fn start(&mut self, handle: &Arc<ClientHandle>, channel: &str) {
+        if self.0.is_none() {
+            send_typing_start(handle, channel).await;
+            self.0 = Some(spawn_typing_keepalive(handle.clone(), channel.to_string()));
+        }
+    }
+}
 
 impl Drop for TypingKeepaliveGuard {
     fn drop(&mut self) {
