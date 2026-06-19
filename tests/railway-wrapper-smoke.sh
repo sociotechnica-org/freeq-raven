@@ -53,6 +53,7 @@ chmod +x "$TMP_ROOT/stub-bin/curl"
 cat >"$TMP_ROOT/stub-bin/bash" <<SH
 #!/bin/sh
 printf '%s\n' "\$@" > "$TMP_ROOT/install.args"
+cat >/dev/null
 exit 0
 SH
 chmod +x "$TMP_ROOT/stub-bin/bash"

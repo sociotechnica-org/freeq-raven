@@ -117,6 +117,20 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+wait_for_first_exit() {
+	local pid
+
+	while true; do
+		for pid in "$@"; do
+			if ! kill -0 "$pid" 2>/dev/null; then
+				wait "$pid"
+				return $?
+			fi
+		done
+		sleep 0.2
+	done
+}
+
 set +e
 ax2_output="$(
 	"$AX2_BIN" start all \
@@ -147,7 +161,7 @@ cd "$ROOT"
 raven_pid=$!
 
 set +e
-wait -n "$heartbeat_pid" "$raven_pid"
+wait_for_first_exit "$heartbeat_pid" "$raven_pid"
 status=$?
 set -e
 exit "$status"
