@@ -10,8 +10,6 @@
 //! call while we're transcribing one, we log and skip.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
-use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -23,7 +21,6 @@ use freeq_av::{AvConfig, AvParticipant, AvSession, Speaker, VideoHandle, broadca
 use freeq_sdk::auth::KeySigner;
 use freeq_sdk::client::{self, ClientHandle, ConnectConfig};
 use freeq_sdk::event::Event;
-use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::task::{JoinHandle, JoinSet};
 
@@ -198,137 +195,11 @@ fn clear_session_context(cfg: &SharedConfig, channel: &str) {
         .remove(channel);
 }
 
-fn question_is_direct_echo_request(question: &str) -> bool {
-    let q = question.to_ascii_lowercase();
-    const ECHO_PHRASES: &[&str] = &[
-        "reply with exactly",
-        "say this marker back",
-        "say this marker back once",
-        "say this exact",
-        "include this exact token",
-        "repeat this marker",
-        "repeat after me",
-    ];
-    ECHO_PHRASES.iter().any(|phrase| q.contains(phrase))
-}
-
-fn spawn_tool_request(
-    cfg: Arc<SharedConfig>,
-    handle: Arc<ClientHandle>,
-    channel: String,
-    asker: String,
-    question: String,
-    transcript: String,
-    route: qa::TurnRouteKind,
-) {
-    let Some(command) = cfg.tool_command.clone() else {
-        return;
-    };
-    tokio::spawn(async move {
-        let _ = handle.typing_start(&channel).await;
-        let payload = serde_json::json!({
-            "channel": channel,
-            "asker": asker,
-            "bot": cfg.nick,
-            "question": question,
-            "route": route.as_str(),
-            "session_context": transcript,
-            "target_workdir": cfg.tool_workdir.as_ref().map(|p| p.display().to_string()),
-            "constraints": [
-                "Use the configured target product repository, not alexandria-internal, unless explicitly instructed.",
-                "Use installed public Alexandria skill files only.",
-                "Do not rely on private Alexandria maintainer skills.",
-                "If route is background, keep working without requiring the live room to wait.",
-                "Post a concise result suitable for a Freeq chat room."
-            ],
-        });
-
-        let mut cmd = tokio::process::Command::new("/bin/sh");
-        cmd.arg("-lc")
-            .arg(&command)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .env("FREEQ_RAVEN_CHANNEL", &channel)
-            .env("FREEQ_RAVEN_ASKER", &asker);
-        if let Some(workdir) = &cfg.tool_workdir {
-            cmd.current_dir(workdir);
-        }
-
-        let mut child = match cmd.spawn() {
-            Ok(child) => child,
-            Err(e) => {
-                let _ = handle
-                    .privmsg(&channel, &format!("[raven/tool] failed to start: {e}"))
-                    .await;
-                let _ = handle.typing_stop(&channel).await;
-                return;
-            }
-        };
-
-        let typing_handle = {
-            let handle = handle.clone();
-            let channel = channel.clone();
-            tokio::spawn(async move {
-                loop {
-                    tokio::time::sleep(Duration::from_secs(5)).await;
-                    let _ = handle.typing_start(&channel).await;
-                }
-            })
-        };
-
-        if let Some(mut stdin) = child.stdin.take() {
-            let _ = stdin.write_all(payload.to_string().as_bytes()).await;
-            let _ = stdin.shutdown().await;
-        }
-
-        let output =
-            match tokio::time::timeout(Duration::from_secs(900), child.wait_with_output()).await {
-                Ok(Ok(output)) => output,
-                Ok(Err(e)) => {
-                    let _ = handle
-                        .privmsg(&channel, &format!("[raven/tool] failed: {e}"))
-                        .await;
-                    typing_handle.abort();
-                    let _ = handle.typing_stop(&channel).await;
-                    return;
-                }
-                Err(_) => {
-                    let _ = handle
-                        .privmsg(&channel, "[raven/tool] timed out after 15 minutes")
-                        .await;
-                    typing_handle.abort();
-                    let _ = handle.typing_stop(&channel).await;
-                    return;
-                }
-            };
-        typing_handle.abort();
-        let _ = handle.typing_stop(&channel).await;
-
-        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        let mut body = format!("[raven/tool] exited with {}", output.status);
-        if !stdout.is_empty() {
-            body.push_str("\n");
-            body.push_str(&stdout);
-        }
-        if !stderr.is_empty() {
-            body.push_str("\nstderr:\n");
-            body.push_str(&stderr);
-        }
-        if body.chars().count() > 4_000 {
-            body = body.chars().take(4_000).collect::<String>();
-            body.push_str("\n[truncated]");
-        }
-        record_session_line(&cfg, &channel, "tool", "raven-tool", &body);
-        post_long(&handle, &channel, &body).await;
-    });
-}
 use crate::imagegen::AiImageConfig;
 use crate::stt::{SttEngine, to_whisper_pcm};
 use crate::video::VideoTile;
 use crate::whiteboard::Step;
-use crate::{imagegen, qa, summary, tts, vision};
+use crate::{claude_agent, imagegen, qa, summary, tts, vision};
 
 pub struct RunConfig {
     pub server: String,
@@ -368,10 +239,9 @@ pub struct RunConfig {
     /// Inception API key + Mercury reasoning effort for fast live Q&A.
     pub inception_api_key: Option<String>,
     pub inception_reasoning_effort: String,
-    /// Optional local command for heavy work. Receives a JSON payload
-    /// on stdin and posts its stdout/stderr back to the Freeq room.
-    pub tool_command: Option<String>,
-    pub tool_workdir: Option<PathBuf>,
+    /// Optional Claude Agent SDK sidecar. When set, addressed room
+    /// turns use the sidecar as the primary LLM/session/tool loop.
+    pub claude_agent: Option<claude_agent::ClaudeAgentConfig>,
     /// Groq vision model for questions about a participant's shared
     /// screen or camera.
     pub vision_model: String,
@@ -430,8 +300,7 @@ pub(crate) struct SharedConfig {
     pub(crate) groq_answer_model: String,
     pub(crate) inception_api_key: Option<String>,
     pub(crate) inception_reasoning_effort: String,
-    pub(crate) tool_command: Option<String>,
-    pub(crate) tool_workdir: Option<PathBuf>,
+    pub(crate) claude_agent: Option<claude_agent::ClaudeAgentConfig>,
     pub(crate) vision_model: String,
     pub(crate) elevenlabs_api_key: Option<String>,
     pub(crate) elevenlabs_voice_id: String,
@@ -494,6 +363,10 @@ pub(crate) struct SharedConfig {
     /// of whether the last turn came through AV or typed IRC.
     pub(crate) session_context:
         std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, Vec<String>>>>,
+    /// Per-channel Claude Agent SDK session IDs returned by the sidecar.
+    /// The sidecar resumes these sessions on follow-up turns, giving the
+    /// room one long-running Claude session per channel.
+    pub(crate) claude_sessions: claude_agent::ClaudeSessionMap,
     /// Deadline (Instant) until which the strict human-only-address
     /// policy is relaxed and bots may answer each other freely. A
     /// human speaking the discussion trigger ("discuss it", "debate
@@ -570,8 +443,7 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
         groq_answer_model,
         inception_api_key,
         inception_reasoning_effort,
-        tool_command,
-        tool_workdir,
+        claude_agent,
         vision_model,
         elevenlabs_api_key,
         elevenlabs_voice_id,
@@ -684,8 +556,7 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
         groq_answer_model,
         inception_api_key,
         inception_reasoning_effort,
-        tool_command,
-        tool_workdir,
+        claude_agent,
         vision_model,
         elevenlabs_api_key,
         elevenlabs_voice_id,
@@ -704,6 +575,9 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
         decisions: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         diagrams: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         session_context: std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )),
+        claude_sessions: std::sync::Arc::new(tokio::sync::Mutex::new(
             std::collections::HashMap::new(),
         )),
         discussion_until: std::sync::Arc::new(std::sync::Mutex::new(
@@ -1061,7 +935,9 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
                     );
                     continue;
                 }
-                if let Some(reason) = missing_answer_config(&cfg) {
+                if cfg.claude_agent.is_none()
+                    && let Some(reason) = missing_answer_config(&cfg)
+                {
                     let _ = handle_arc
                         .privmsg(&target, &format!("{from}: {reason}"))
                         .await;
@@ -1107,13 +983,16 @@ async fn answer_and_speak(
     // The asker's own video (their screen/camera), for visual questions.
     asker_video: Option<VideoHandle>,
 ) {
-    if let Some(reason) = missing_answer_config(&cfg) {
+    if cfg.claude_agent.is_none()
+        && let Some(reason) = missing_answer_config(&cfg)
+    {
         let _ = handle
             .privmsg(&channel, &format!("{asker}: {reason}"))
             .await;
         return;
     }
     tracing::info!(%asker, %question, "answering addressed question");
+    let turn_source = if speaker.is_some() { "voice" } else { "chat" };
 
     // Show the "thinking" mood on the tile while the LLM call runs.
     // The guard clears it on every exit path.
@@ -1214,80 +1093,6 @@ async fn answer_and_speak(
 
     let mut chunker = qa::SentenceChunker::new();
 
-    if cfg
-        .tool_command
-        .as_deref()
-        .map(str::trim)
-        .is_some_and(|s| !s.is_empty())
-        && !question_is_direct_echo_request(&question)
-        && let Some(inception_key) = cfg.inception_api_key.as_deref()
-    {
-        tracing::info!(%asker, %question, "routing addressed question with mercury");
-        match tokio::time::timeout(
-            Duration::from_secs(12),
-            qa::inception_route_turn(
-                &cfg.http,
-                inception_key,
-                &cfg.groq_answer_model,
-                &cfg.inception_reasoning_effort,
-                &transcript,
-                &question,
-            ),
-        )
-        .await
-        {
-            Ok(Ok(route)) if route.kind != qa::TurnRouteKind::Chat => {
-                tracing::info!(route = route.kind.as_str(), "mercury routed turn to tool");
-                let task = route.task.clone().unwrap_or_else(|| question.clone());
-                let default_ack = match route.kind {
-                    qa::TurnRouteKind::Background => {
-                        "I'll put that in the background and report back here."
-                    }
-                    qa::TurnRouteKind::ToolNow => {
-                        "I'll run that through the local subagent and post the result here."
-                    }
-                    qa::TurnRouteKind::Chat => unreachable!(),
-                };
-                let ack = route.acknowledgement.as_deref().unwrap_or(default_ack);
-                for sentence in chunker.push(ack) {
-                    let _ = tx.send(sentence);
-                }
-                if let Some(last) = chunker.flush() {
-                    let _ = tx.send(last);
-                }
-                let _ = handle
-                    .privmsg(
-                        &channel,
-                        &format!("[raven/tool:{}] accepted: {task}", route.kind.as_str()),
-                    )
-                    .await;
-                spawn_tool_request(
-                    cfg.clone(),
-                    handle.clone(),
-                    channel.clone(),
-                    asker.clone(),
-                    task,
-                    transcript,
-                    route.kind,
-                );
-                drop(tx);
-                if let Some(t) = speak_task {
-                    let _ = t.await;
-                }
-                return;
-            }
-            Ok(Ok(route)) => {
-                tracing::info!(route = route.kind.as_str(), "mercury routed turn to chat");
-            }
-            Ok(Err(e)) => {
-                tracing::warn!(error = ?e, "mercury routing failed; falling back to chat");
-            }
-            Err(_) => {
-                tracing::warn!("mercury routing timed out; falling back to chat");
-            }
-        }
-    }
-
     // A visual question we can actually see → the vision model with the
     // asker's latest frame. A visual question with no frame → a useful
     // hint (otherwise QA answers "I'm a language model"). Anything else
@@ -1364,10 +1169,12 @@ async fn answer_and_speak(
         // respond — by name, with a comma. The named bot's STT
         // picks that up, address detection fires, peer answers, and
         // the chain self-sustains until the discussion window expires.
-        let mut prompt_storage: Option<String> = None;
-        let effective_system_prompt: Option<&str> =
+        let effective_system_prompt =
             if is_discussion_mode_active(&cfg) && !cfg.peer_agents.is_empty() {
-                let base = cfg.character_system_prompt.as_deref().unwrap_or("");
+                let base = cfg
+                    .character_system_prompt
+                    .clone()
+                    .unwrap_or_else(|| qa::default_system_prompt().to_string());
                 // Build a peer list excluding ourselves so the bot
                 // does not accidentally address itself.
                 let self_canonical = cfg
@@ -1383,90 +1190,123 @@ async fn answer_and_speak(
                     .map(|s| s.as_str())
                     .collect();
                 let peer_list = peers.join(", ");
-                let augmented = format!(
+                format!(
                     "{base}\n\nDISCUSSION MODE IS ACTIVE. After your answer \
 (1-2 sentences max), end with a one-sentence direct address to ONE specific \
 peer by name (\"{peer_list}\") inviting their response. Format: \"<Name>, \
 <one-line follow-up question>.\" Pick the peer whose viewpoint would most \
 sharpen the thread. Do NOT address yourself."
-                );
-                prompt_storage = Some(augmented);
-                prompt_storage.as_deref()
+                )
             } else {
-                cfg.character_system_prompt.as_deref()
+                cfg.character_system_prompt
+                    .clone()
+                    .unwrap_or_else(|| qa::default_system_prompt().to_string())
             };
 
-        // Dispatch per configured answer provider. The provider choice
-        // controls only the hot conversational answer path; Groq may
-        // still be used separately for STT, vision, and visual cards.
-        match configured_answer_provider(&cfg) {
-            AnswerProvider::Anthropic => match cfg.anthropic_key.as_deref() {
-                Some(akey) => {
-                    qa::anthropic_answer_streaming(
-                        &cfg.http,
-                        akey,
-                        &cfg.groq_answer_model,
-                        &transcript,
-                        &question,
-                        effective_system_prompt,
-                        |delta| {
-                            for sentence in chunker.push(delta) {
-                                let _ = tx.send(sentence);
-                            }
-                        },
-                    )
-                    .await
+        if let Some(agent_cfg) = cfg.claude_agent.as_ref() {
+            tracing::info!(%asker, %turn_source, "answering with claude agent sidecar");
+            claude_agent::ask(
+                agent_cfg,
+                &cfg.claude_sessions,
+                claude_agent::ClaudeAgentTurn {
+                    channel: channel.clone(),
+                    asker: asker.clone(),
+                    source: turn_source.to_string(),
+                    question: question.clone(),
+                    session_context: transcript.clone(),
+                    system_prompt: effective_system_prompt,
+                    session_id: None,
+                },
+            )
+            .await
+            .map(|answer| {
+                if let Some(session_id) = &answer.session_id {
+                    tracing::info!(%session_id, "claude agent session resumed");
                 }
-                None => Err(anyhow::anyhow!(
-                    "model {} requires ANTHROPIC_API_KEY",
-                    cfg.groq_answer_model
-                )),
-            },
-            AnswerProvider::Groq => match cfg.groq_api_key.as_deref() {
-                Some(groq_key) => {
-                    qa::answer_streaming(
-                        &cfg.http,
-                        groq_key,
-                        &cfg.groq_answer_model,
-                        &transcript,
-                        &question,
-                        effective_system_prompt,
-                        |delta| {
-                            for sentence in chunker.push(delta) {
-                                let _ = tx.send(sentence);
-                            }
-                        },
-                    )
-                    .await
+                if !answer.plugins.is_empty() {
+                    tracing::info!(plugins = ?answer.plugins, "claude agent plugins loaded");
                 }
-                None => Err(anyhow::anyhow!(
-                    "model {} requires GROQ_API_KEY",
-                    cfg.groq_answer_model
-                )),
-            },
-            AnswerProvider::Inception => match cfg.inception_api_key.as_deref() {
-                Some(inception_key) => {
-                    qa::inception_answer_streaming(
-                        &cfg.http,
-                        inception_key,
-                        &cfg.groq_answer_model,
-                        &cfg.inception_reasoning_effort,
-                        &transcript,
-                        &question,
-                        effective_system_prompt,
-                        |delta| {
-                            for sentence in chunker.push(delta) {
-                                let _ = tx.send(sentence);
-                            }
-                        },
-                    )
-                    .await
+                for sentence in chunker.push(&answer.text) {
+                    let _ = tx.send(sentence);
                 }
-                None => Err(anyhow::anyhow!(
-                    "model {} requires INCEPTION_API_KEY",
-                    cfg.groq_answer_model
-                )),
-            },
+                qa::Answer {
+                    text: answer.text,
+                    source: None,
+                }
+            })
+        } else {
+            // Dispatch per configured answer provider. The provider choice
+            // controls only the hot conversational answer path; Groq may
+            // still be used separately for STT, vision, and visual cards.
+            match configured_answer_provider(&cfg) {
+                AnswerProvider::Anthropic => match cfg.anthropic_key.as_deref() {
+                    Some(akey) => {
+                        qa::anthropic_answer_streaming(
+                            &cfg.http,
+                            akey,
+                            &cfg.groq_answer_model,
+                            &transcript,
+                            &question,
+                            Some(effective_system_prompt.as_str()),
+                            |delta| {
+                                for sentence in chunker.push(delta) {
+                                    let _ = tx.send(sentence);
+                                }
+                            },
+                        )
+                        .await
+                    }
+                    None => Err(anyhow::anyhow!(
+                        "model {} requires ANTHROPIC_API_KEY",
+                        cfg.groq_answer_model
+                    )),
+                },
+                AnswerProvider::Groq => match cfg.groq_api_key.as_deref() {
+                    Some(groq_key) => {
+                        qa::answer_streaming(
+                            &cfg.http,
+                            groq_key,
+                            &cfg.groq_answer_model,
+                            &transcript,
+                            &question,
+                            Some(effective_system_prompt.as_str()),
+                            |delta| {
+                                for sentence in chunker.push(delta) {
+                                    let _ = tx.send(sentence);
+                                }
+                            },
+                        )
+                        .await
+                    }
+                    None => Err(anyhow::anyhow!(
+                        "model {} requires GROQ_API_KEY",
+                        cfg.groq_answer_model
+                    )),
+                },
+                AnswerProvider::Inception => match cfg.inception_api_key.as_deref() {
+                    Some(inception_key) => {
+                        qa::inception_answer_streaming(
+                            &cfg.http,
+                            inception_key,
+                            &cfg.groq_answer_model,
+                            &cfg.inception_reasoning_effort,
+                            &transcript,
+                            &question,
+                            Some(effective_system_prompt.as_str()),
+                            |delta| {
+                                for sentence in chunker.push(delta) {
+                                    let _ = tx.send(sentence);
+                                }
+                            },
+                        )
+                        .await
+                    }
+                    None => Err(anyhow::anyhow!(
+                        "model {} requires INCEPTION_API_KEY",
+                        cfg.groq_answer_model
+                    )),
+                },
+            }
         }
     };
 
@@ -2750,12 +2590,6 @@ fn _hashmap_marker() -> HashMap<String, String> {
     HashMap::new()
 }
 
-// Silence PathBuf unused-import warning if we move things around.
-#[allow(dead_code)]
-fn _pathbuf_marker() -> PathBuf {
-    PathBuf::new()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3106,18 +2940,5 @@ mod tests {
                 session_id: "x".into()
             }
         );
-    }
-
-    #[test]
-    fn direct_echo_requests_bypass_tool_router() {
-        assert!(question_is_direct_echo_request(
-            "include this exact token in a short reply: probe-123"
-        ));
-        assert!(question_is_direct_echo_request(
-            "please say this marker back once: freeq-raven-repo-smoke-123"
-        ));
-        assert!(question_is_direct_echo_request("reply with exactly: ok"));
-        assert!(!question_is_direct_echo_request("inspect the repo"));
-        assert!(!question_is_direct_echo_request("run the Fabro play"));
     }
 }

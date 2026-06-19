@@ -2,7 +2,7 @@
 
 `freeq-raven` is Raven's product repo: a heavily customized Freeq chat and AV
 agent that joins real Freeq rooms, participates in calls, keeps one room
-session context, and can hand heavier work to local tools.
+session context, and answers through a Claude Agent SDK session.
 
 Freeq itself remains the protocol/runtime dependency. Raven-specific behavior
 belongs here, not in Freeq examples.
@@ -11,9 +11,9 @@ belongs here, not in Freeq examples.
 
 - `chad/freeq`: upstream Freeq runtime, SDK, AV, bot, and example code. Generic
   fixes should go there directly.
-- `sociotechnica-org/freeq-raven`: Raven product behavior, prompts, model
-  routing, local launch/deployment, and tool handoff policy.
-- target product repos: the work Raven inspects or edits when she runs Codex,
+- `sociotechnica-org/freeq-raven`: Raven product behavior, prompts, local
+  launch/deployment, and Claude Agent SDK sidecar integration.
+- target product repos: the work Raven inspects or edits through Claude tools,
   Alexandria, Fabro, tests, or deployment tools.
 
 This repo depends on Freeq crates from `chad/freeq` by git revision. It does not
@@ -29,7 +29,7 @@ freeq-raven/
   bin/
     freeq-raven           # loads .env and execs target/release/freeq-raven
     freeq-raven-start     # background/tmux launcher
-    raven-tool-runner     # Codex handoff command
+    raven-claude-agent    # Claude Agent SDK sidecar command
   ops/
     systemd/              # Linux service template
 ```
@@ -40,40 +40,45 @@ this standalone Rust workspace.
 ## Architecture
 
 Raven should be one agent loop, not one chat bot plus one AV bot plus a separate
-tool brain. Chat, voice, tool results, and agent replies all flow through the
-same runtime process and same per-channel context.
+tool brain. Chat and voice flow through the same runtime process, the same
+per-channel context, and the same Claude session.
 
-```text
-Freeq IRC + AV
-  -> chat adapter
-  -> AV adapter: VAD, STT, TTS, video tile
-  -> shared per-channel session context
-  -> Raven turn router/planner
-  -> chat reply, voice reply, typing/presence, or tool handoff
-  -> tool result appended back into the same context
+```mermaid
+flowchart TD
+  Chat["IRC PRIVMSG addressed to Raven"] --> Ledger["record_session_line / per-channel ledger"]
+  AV["AV audio addressed to Raven"] --> STT["VAD + STT"]
+  STT --> Ledger
+  Ledger --> Visual{"Visual question with current frame?"}
+  Visual -- yes --> Vision["Groq vision over latest AV frame"]
+  Visual -- no --> Claude["Claude Agent SDK sidecar"]
+  Claude --> Session["Resume Claude session_id for this channel"]
+  Session --> Tools["Claude tools + Alexandria plugin skills"]
+  Tools --> Answer["Answer text"]
+  Vision --> Answer
+  Answer --> ChatOut["IRC reply"]
+  Answer --> TTS["Optional ElevenLabs speech + video tile"]
 ```
 
-The current implementation keeps the shared session context in memory inside
-the Rust runtime. The next architecture milestone is a durable `raven-session`
-crate backed by SQLite so chat, AV, and tool events can be replayed and audited.
+The Rust runtime owns Freeq adapters, AV frame/audio plumbing, TTS, video, loop
+guards, and the lightweight room ledger. The Claude Agent SDK sidecar owns the
+LLM session and in-session tool loop. It resumes one Claude `session_id` per
+Freeq channel, so chat and AV follow-ups land in the same Claude session.
 
-## Model Loop
+## LLM Session
 
-The live loop defaults to Inception `mercury-2` because it is fast enough for
-room conversation. The runtime gives the model a route choice:
+The normal local loop is:
 
-- `chat`: answer immediately in the room.
-- `tool_now`: run the tool command and post the result when it exits.
-- `background`: acknowledge and let the tool command work without blocking the
-  room.
+- Raven records every chat/voice line in the per-channel ledger.
+- If the addressed turn is visual and the asker has a current frame, Raven uses
+  the vision path.
+- Otherwise Raven sends one turn to `bin/raven-claude-agent`.
+- The sidecar calls `@anthropic-ai/claude-agent-sdk` with the channel's prior
+  Claude `session_id` when present.
+- Claude may answer directly or use its configured tools/skills, including the
+  Alexandria Claude plugin when installed in the agent workdir.
 
-The runtime still owns hard safety gates: ignore self messages, suppress obvious
-bot loops, dedupe smoke-test style prompts, enforce tool timeouts, and emit
-typing indicators while tool work is running.
-
-Mercury is not assumed to be the final planner. The code should evolve toward a
-planner abstraction so simple chat can use a fast model while tool/background
-decisions can be promoted to a stronger model.
+There is no separate Mercury decision about whether to hand a turn to Codex.
+Tool use is Claude's own agent loop inside the resumed Claude session.
 
 ## Freeq Integration
 
@@ -93,9 +98,11 @@ Raven joins `irc.freeq.at` and `#alexandria` by default.
 - Rust toolchain with `cargo`
 - Git
 - optional: `tmux` for durable local background runs
-- optional: authenticated `codex` CLI for heavy-work handoff
+- Node.js for the Claude Agent SDK sidecar
+- authenticated Claude/Anthropic credentials for the Claude Agent SDK
+- optional: Alexandria installed in the agent workdir
 - API keys for the live AV loop:
-  - `INCEPTION_API_KEY`
+  - `ANTHROPIC_API_KEY`
   - `DEEPGRAM_API_KEY`
   - `ELEVENLABS_API_KEY`
 
@@ -113,6 +120,8 @@ cd freeq-raven
 cp .env.example .env
 $EDITOR .env
 make bootstrap
+npm install
+RAVEN_AGENT_WORKDIR=/path/to/target-product-repo bin/freeq-raven-install-alexandria
 ```
 
 For local iteration, `.env` usually starts with:
@@ -122,7 +131,8 @@ FREEQ_SERVER=wss://irc.freeq.at/irc
 FREEQ_CHANNEL=#alexandria
 RAVEN_FREEQ_NICK=Raven
 RAVEN_IDENTITY_NAME=raven
-RAVEN_TOOL_WORKDIR=/absolute/path/to/target-product-repo
+RAVEN_AGENT_WORKDIR=/absolute/path/to/target-product-repo
+RAVEN_ALEXANDRIA_PLUGIN_PATH=/absolute/path/to/target-product-repo/.claude/plugins/alexandria
 ```
 
 Never commit `.env`. It contains live provider keys.
@@ -185,21 +195,29 @@ The local wrapper writes:
 
 7. Confirm Raven replies by voice and her video tile renders.
 
-## Tool Handoff
+## Claude Tools And Alexandria
 
-`RAVEN_TOOL_COMMAND` receives JSON on stdin. The default command is:
+`RAVEN_AGENT_COMMAND` receives one JSON turn on stdin and writes one JSON
+response on stdout. The default command is:
 
 ```bash
-bin/raven-tool-runner
+bin/raven-claude-agent
 ```
 
-The runner executes Codex in `RAVEN_TOOL_WORKDIR`, which should be the target
-product repository. It should not operate in Alexandria's private maintainer
-repo unless the room explicitly asks Raven to inspect Alexandria itself.
+The sidecar executes Claude Agent SDK in `RAVEN_AGENT_WORKDIR`, which should be
+the target product repository. It should not operate in Alexandria's private
+maintainer repo unless the room explicitly asks Raven to inspect Alexandria
+itself.
 
-Alexandria/Fabro integration should happen through project-local/public
-Alexandria tooling installed in the target product repo. Private maintainer
-skills are intentionally outside this repo's runtime contract.
+Install Alexandria into that target repo with:
+
+```bash
+RAVEN_AGENT_WORKDIR=/path/to/target-product-repo bin/freeq-raven-install-alexandria
+```
+
+The sidecar loads the local Claude plugin from
+`$RAVEN_AGENT_WORKDIR/.claude/plugins/alexandria` by default and exposes all
+plugin skills to the Claude Agent SDK session.
 
 ## Systemd Deployment
 
@@ -223,6 +241,8 @@ unit is for an always-on staging agent.
 make check
 make test
 cargo test -p freeq-raven
+cargo test -p freeq-raven --test e2e_two_servers_test scenario_9_addressed_chat_uses_claude_agent_session -- --nocapture
+cargo test -p freeq-raven --test live_irc_freeq_at_test live_irc_freeq_at_addressed_chat_uses_claude_agent_session -- --ignored --nocapture
 ```
 
 The full e2e tests spin up in-process Freeq servers and can take longer than
@@ -232,8 +252,9 @@ coverage first.
 ## Roadmap
 
 - Add durable SQLite `raven-session` event log.
-- Split model routing behind a planner trait.
-- Promote tool/background decisions to a stronger model when Mercury is unsure.
-- Emit richer Freeq-native task events for background work.
+- Make the current in-memory Claude session map durable across Raven restarts.
+- Pass selected AV frames into the Claude agent loop when visual questions need
+  both vision and repo/tool context.
+- Emit richer Freeq-native task events for background Claude tool work.
 - Add a watcher/supervisor process that can wake/restart Raven but never answer
   room messages itself.

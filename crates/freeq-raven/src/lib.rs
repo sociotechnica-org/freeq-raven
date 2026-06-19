@@ -6,6 +6,7 @@
 
 pub mod ambient;
 pub mod character_profile;
+pub mod claude_agent;
 pub mod decisions;
 pub mod diagram;
 pub mod identity;

@@ -2,14 +2,14 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: freeq-raven-store-key ELEVENLABS_API_KEY|DEEPGRAM_API_KEY|GROQ_API_KEY|INCEPTION_API_KEY" >&2
+  echo "usage: freeq-raven-store-key ANTHROPIC_API_KEY|ELEVENLABS_API_KEY|DEEPGRAM_API_KEY|GROQ_API_KEY|INCEPTION_API_KEY" >&2
   exit 2
 }
 
 [[ $# -eq 1 ]] || usage
 
 case "$1" in
-  ELEVENLABS_API_KEY | DEEPGRAM_API_KEY | GROQ_API_KEY | INCEPTION_API_KEY) key_name="$1" ;;
+  ANTHROPIC_API_KEY | ELEVENLABS_API_KEY | DEEPGRAM_API_KEY | GROQ_API_KEY | INCEPTION_API_KEY) key_name="$1" ;;
   *) usage ;;
 esac
 

@@ -1,7 +1,14 @@
 .deps/
 .env
 .runtime/
+node_modules/
 target/
+.alexandria/
+.alexandria-next/
+.claude/settings.json
+.claude/plugins/alexandria/
+.claude/plugins/alexandria-next/
+docs/alexandria/
 *.secret
 *.log
 *.pid

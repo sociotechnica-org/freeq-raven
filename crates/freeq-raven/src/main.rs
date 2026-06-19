@@ -1,6 +1,6 @@
 //! freeq-raven: sample agent that joins freeq rooms and AV sessions,
-//! transcribes voice, answers in chat or speech, and can hand heavier
-//! work to an external runner.
+//! transcribes voice, and answers addressed chat or speech through a
+//! shared per-channel LLM session.
 //!
 //! Lifecycle:
 //! 1. Load (or auto-create) a did:key identity at
@@ -15,16 +15,15 @@
 //!    VAD, and transcribe via the configured STT backend.
 //! 6. Feed chat and voice utterances into one shared per-channel
 //!    context ledger; addressed questions use the same answer path.
-//! 7. Normal conversation is handled by the configured fast answer
-//!    provider; heavier repo/Fabro/Alexandria work can be delegated to
-//!    `--tool-command`.
+//! 7. Addressed turns can be sent to a Claude Agent SDK sidecar, which
+//!    owns the long-running Claude session and in-session tool loop.
 //!
 //! Run as a one-shot for development:
-//!   INCEPTION_API_KEY=sk-... cargo run --release --bin freeq-raven -- \
+//!   ANTHROPIC_API_KEY=sk-... RAVEN_AGENT_COMMAND=./bin/raven-claude-agent \
+//!   cargo run --release --bin freeq-raven -- \
 //!     --server wss://irc.freeq.at/irc \
 //!     --channel '#avtest' \
-//!     --answer-provider inception \
-//!     --answer-model mercury-2
+//!     --agent-command ./bin/raven-claude-agent
 //!
 //! Identity files live at `~/.freeq/bots/raven/`. First run creates
 //! them; subsequent runs reuse the same DID.
@@ -91,9 +90,9 @@ struct Cli {
     answer_provider: String,
 
     /// Model for answering questions addressed to the bot. Flag name
-    /// kept as `--groq-answer-model` for back-compat; use
-    /// `--answer-model mercury-2 --answer-provider inception` for the
-    /// fast Raven conversation path.
+    /// kept as `--groq-answer-model` for back-compat; when
+    /// `--agent-command` is set, this is forwarded to the Claude Agent
+    /// SDK sidecar.
     #[arg(long, alias = "answer-model", default_value = "claude-opus-4-7")]
     groq_answer_model: String,
 
@@ -103,17 +102,33 @@ struct Cli {
     #[arg(long, default_value = "instant")]
     inception_reasoning_effort: String,
 
-    /// Optional local command for heavy work requests. Raven stays on
-    /// the fast answer model for normal conversation; requests that
-    /// look like repo/Fabro/Alexandria work are handed to this command
-    /// with a JSON payload on stdin.
-    #[arg(long, env = "RAVEN_TOOL_COMMAND")]
-    tool_command: Option<String>,
+    /// Claude Agent SDK sidecar command. Receives one JSON request on
+    /// stdin and writes one JSON response on stdout. When set, this is
+    /// the primary addressed-turn LLM path.
+    #[arg(long, env = "RAVEN_AGENT_COMMAND")]
+    agent_command: Option<String>,
 
-    /// Working directory for `--tool-command`, usually the target
-    /// product repo. Defaults to the current process directory.
-    #[arg(long, env = "RAVEN_TOOL_WORKDIR")]
-    tool_workdir: Option<PathBuf>,
+    /// Working directory for the Claude Agent SDK session, usually the
+    /// target product repo. Defaults to the current process directory.
+    #[arg(long, env = "RAVEN_AGENT_WORKDIR")]
+    agent_workdir: Option<PathBuf>,
+
+    /// Local Alexandria Claude plugin path. Defaults in the sidecar to
+    /// `.claude/plugins/alexandria` in the agent working directory.
+    #[arg(long, env = "RAVEN_ALEXANDRIA_PLUGIN_PATH")]
+    alexandria_plugin_path: Option<PathBuf>,
+
+    /// Permission mode for the Claude Agent SDK sidecar.
+    #[arg(long, env = "RAVEN_AGENT_PERMISSION_MODE", default_value = "dontAsk")]
+    agent_permission_mode: String,
+
+    /// Max agentic turns per addressed room turn.
+    #[arg(long, env = "RAVEN_AGENT_MAX_TURNS", default_value_t = 8)]
+    agent_max_turns: u32,
+
+    /// Timeout in seconds for one Claude Agent SDK sidecar turn.
+    #[arg(long, env = "RAVEN_AGENT_TIMEOUT_SECS", default_value_t = 300)]
+    agent_timeout_secs: u64,
 
     /// Groq vision model for questions about a participant's shared
     /// screen or camera (e.g. "Raven, what's on my screen?").
@@ -292,6 +307,7 @@ async fn main() -> Result<()> {
         );
     }
 
+    let agent_model = cli.groq_answer_model.clone();
     irc::run(irc::RunConfig {
         server: cli.server,
         channels: cli.channel,
@@ -310,8 +326,18 @@ async fn main() -> Result<()> {
         groq_answer_model: cli.groq_answer_model,
         inception_api_key,
         inception_reasoning_effort: cli.inception_reasoning_effort,
-        tool_command: cli.tool_command,
-        tool_workdir: cli.tool_workdir,
+        claude_agent: cli
+            .agent_command
+            .filter(|s| !s.trim().is_empty())
+            .map(|command| freeq_raven::claude_agent::ClaudeAgentConfig {
+                command,
+                workdir: cli.agent_workdir,
+                alexandria_plugin_path: cli.alexandria_plugin_path,
+                model: Some(agent_model),
+                permission_mode: cli.agent_permission_mode,
+                max_turns: cli.agent_max_turns,
+                timeout: std::time::Duration::from_secs(cli.agent_timeout_secs),
+            }),
         vision_model: cli.vision_model,
         elevenlabs_api_key,
         elevenlabs_model: cli.elevenlabs_model,

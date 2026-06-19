@@ -70,37 +70,6 @@ pub struct Answer {
     pub source: Option<Source>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TurnRouteKind {
-    Chat,
-    ToolNow,
-    Background,
-}
-
-impl TurnRouteKind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            TurnRouteKind::Chat => "chat",
-            TurnRouteKind::ToolNow => "tool_now",
-            TurnRouteKind::Background => "background",
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct TurnRoute {
-    pub kind: TurnRouteKind,
-    pub task: Option<String>,
-    pub acknowledgement: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct RawTurnRoute {
-    route: Option<String>,
-    task: Option<String>,
-    acknowledgement: Option<String>,
-}
-
 const SYSTEM: &str = "You are Raven, a live voice-AND-video agent in a \
 freeq call. Your reply is spoken aloud while an illustrated visual \
 appears on your video tile in parallel — you have a voice, a tile that \
@@ -129,6 +98,10 @@ plainly.\n\
 7. NEVER mention the words 'scene card', 'video tile', 'image query', \
 'transcript', or any other internal mechanism — those are how you \
 work, not what you say.";
+
+pub fn default_system_prompt() -> &'static str {
+    SYSTEM
+}
 
 /// Answer `question` against `transcript` via Groq chat completions.
 /// `transcript` is the joined `<nick>: <utterance>` lines so far (may
@@ -186,126 +159,6 @@ fn user_prompt(transcript: &str, question: &str) -> String {
         transcript.to_string()
     };
     format!("Call transcript so far:\n{context}\n\nQuestion: {question}")
-}
-
-const ROUTER_SYSTEM: &str = "You are Raven's routing brain inside a \
-live Freeq room. Decide whether Raven should answer immediately or \
-delegate to a local Codex/Alexandria/Fabro subagent. Output ONLY a JSON \
-object with this shape: \
-{\"route\":\"chat|tool_now|background\",\"task\":\"...\",\"acknowledgement\":\"...\"}.\n\n\
-Route meanings:\n\
-- chat: Raven can answer conversationally now. Use this for greetings, \
-opinions, explanations, exact repeat/marker requests, and questions \
-about the current conversation.\n\
-- tool_now: Raven should call the local tool runner because the request \
-needs repo inspection, GitHub, Alexandria, Fabro, tests, builds, deploy \
-state, or filesystem context, and the user is waiting for the result.\n\
-- background: Raven should call the local tool runner but keep the room \
-moving because the task is broad, long-running, multi-step, mutating, or \
-likely to take more than a minute.\n\n\
-Rules:\n\
-1. Do not delegate exact repeat, echo, or marker smoke-test prompts.\n\
-2. Prefer chat for ordinary discussion even if the words repo, skill, \
-test, or build appear incidentally.\n\
-3. Delegate when the user asks Raven to inspect, change, run, build, \
-deploy, open a PR/issue, use Fabro, use Alexandria, or work in the \
-target product repository.\n\
-4. Use background for implementation work, Fabro/Alexandria plays, \
-deployments, full audits, and test suites unless the user clearly asks \
-for an immediate tiny check.\n\
-5. The task must be a concise imperative for the subagent. Never mention \
-private alexandria-internal maintainer skills.\n\
-6. The acknowledgement must be one short sentence suitable for voice.";
-
-/// Ask Mercury to decide whether the current turn should stay in the
-/// hot conversational loop or delegate to the local tool runner.
-pub async fn inception_route_turn(
-    client: &reqwest::Client,
-    api_key: &str,
-    model: &str,
-    reasoning_effort: &str,
-    transcript: &str,
-    question: &str,
-) -> Result<TurnRoute> {
-    let context = if transcript.trim().is_empty() {
-        "(no session context yet)".to_string()
-    } else {
-        transcript.to_string()
-    };
-    let user = format!("Session context:\n{context}\n\nLatest user turn:\n{question}");
-    let mut body = serde_json::json!({
-        "model": model,
-        "max_tokens": 220,
-        "temperature": 0.0,
-        "response_format": { "type": "json_object" },
-        "messages": [
-            { "role": "system", "content": ROUTER_SYSTEM },
-            { "role": "user", "content": user },
-        ],
-    });
-    if !reasoning_effort.trim().is_empty() {
-        body["reasoning_effort"] = serde_json::json!(reasoning_effort);
-    }
-
-    let resp = client
-        .post("https://api.inceptionlabs.ai/v1/chat/completions")
-        .timeout(Duration::from_secs(10))
-        .bearer_auth(api_key)
-        .json(&body)
-        .send()
-        .await
-        .context("inception routing request failed")?;
-
-    let status = resp.status();
-    if !status.is_success() {
-        let err = resp.text().await.unwrap_or_default();
-        anyhow::bail!("inception routing {status}: {err}");
-    }
-    let parsed: ChatResponse = resp
-        .json()
-        .await
-        .context("inception routing parse failed")?;
-    let Some(choice) = parsed.choices.into_iter().next() else {
-        anyhow::bail!("inception routing returned no choices");
-    };
-    let text = choice.message.content.trim();
-    let raw = match serde_json::from_str::<RawTurnRoute>(text) {
-        Ok(raw) => raw,
-        Err(_) => {
-            let Some(value) = extract_json(text) else {
-                anyhow::bail!("inception routing returned non-json content");
-            };
-            serde_json::from_value::<RawTurnRoute>(value)
-                .context("inception routing json shape invalid")?
-        }
-    };
-
-    let kind = match raw
-        .route
-        .as_deref()
-        .unwrap_or("chat")
-        .trim()
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "tool" | "tool_now" | "now" => TurnRouteKind::ToolNow,
-        "background" | "bg" => TurnRouteKind::Background,
-        _ => TurnRouteKind::Chat,
-    };
-    let task = raw
-        .task
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
-    let acknowledgement = raw
-        .acknowledgement
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
-
-    Ok(TurnRoute {
-        kind,
-        task,
-        acknowledgement,
-    })
 }
 
 /// The top web source behind an answer — the first result of the first
@@ -937,13 +790,6 @@ mod tests {
         // No object, or invalid JSON → None, never a panic.
         assert!(extract_json("no json here").is_none());
         assert!(extract_json("{not valid").is_none());
-    }
-
-    #[test]
-    fn turn_route_kind_labels_are_stable() {
-        assert_eq!(TurnRouteKind::Chat.as_str(), "chat");
-        assert_eq!(TurnRouteKind::ToolNow.as_str(), "tool_now");
-        assert_eq!(TurnRouteKind::Background.as_str(), "background");
     }
 
     // ---------- SentenceChunker ----------
