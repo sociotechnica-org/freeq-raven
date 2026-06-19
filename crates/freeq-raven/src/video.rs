@@ -207,14 +207,17 @@ impl Scene {
 ///   brackets, EQ strip, state sticker, HUD chip, scene cards,
 ///   whiteboards, vision PiP, ambient topic. Owns every overlay the
 ///   rest of `freeq-raven` orchestrates.
+/// - `Coin` renders the raven coin from authored MP4 loops for
+///   idle/listening/thinking/speaking/vision. The informational overlay
+///   layer still composes on top.
 /// - `Particles { character }` is the ghostly particle-face renderer —
-///   a 12K-particle procedural face from `~/src/ghostly`. Scene cards,
-///   whiteboards, and the ambient HUD are NO-OPS on this path (the
-///   particle render is a single-layer face, not a UI). Mood + audio
-///   level still drive palette and breath.
+///   a 12K-particle procedural face from `~/src/ghostly`. Mood + audio
+///   level drive palette and breath; the informational overlay layer
+///   still composes on top.
 #[derive(Clone, Debug)]
 pub enum Backend {
     Svg,
+    Coin,
     Particles { character: String },
 }
 
@@ -481,6 +484,7 @@ impl VideoTile {
             .name("raven-video".into())
             .spawn(move || match backend {
                 Backend::Svg => tile.render_loop(),
+                Backend::Coin => crate::video_coin::render_loop(tile),
                 Backend::Particles { character } => {
                     crate::video_particles::render_loop(tile, &character)
                 }
@@ -1684,22 +1688,22 @@ fn timeline_body(s: &SceneSpec, e: f32, accent: &str) -> String {
 }
 
 // ---------------------------------------------------------------------
-// Overlay layer for the particles render backend
+// Overlay layer for single-layer visual render backends
 // ---------------------------------------------------------------------
 
 /// Build an SVG layer that contains JUST the rich overlays from this
 /// module — scene card (with backdrop image), whiteboard, ambient HUD
 /// chip, vision PiP — without the orb / corner brackets / EQ strip /
-/// state sticker (those would fight the particle face).
+/// state sticker (those would fight the underlying avatar visual).
 ///
 /// Returns `None` when nothing's worth drawing — so the particles
 /// renderer can skip the rasterize + composite step on quiet frames.
-/// The caller (`video_particles::render_loop`) rasterizes the SVG to
+/// The caller rasterizes the SVG to
 /// a Pixmap and draw-pixmaps it on top of the particle field.
 ///
 /// `time` is monotonic seconds since the renderer started (drives the
 /// HUD blink + the no-image backdrop's drifting glow).
-pub(crate) fn overlay_svg_for_particles(tile: &VideoTile, time: f32) -> Option<String> {
+pub(crate) fn overlay_svg_for_visual_backend(tile: &VideoTile, time: f32) -> Option<String> {
     // ── Snapshot the overlay state ──
     let scene_data = tile.scene.lock().ok().and_then(|g| {
         g.as_ref().filter(|s| s.is_visible()).map(|s| {
@@ -1837,6 +1841,41 @@ pub(crate) fn overlay_svg_for_particles(tile: &VideoTile, time: f32) -> Option<S
 
     svg.push_str("</svg>");
     Some(svg)
+}
+
+/// Rasterize an overlay SVG (from [`overlay_svg_for_visual_backend`]) onto the
+/// transparent `scratch` pixmap, then composite it over `base`. Shared by every
+/// single-layer visual backend (coin, particles) so the parse → clear → render
+/// → draw_pixmap dance lives in one place. A parse failure is logged and
+/// skipped — a malformed overlay must never kill the frame.
+pub(crate) fn composite_overlay(
+    base: &mut resvg::tiny_skia::Pixmap,
+    scratch: &mut resvg::tiny_skia::Pixmap,
+    svg: &str,
+    opt: &resvg::usvg::Options,
+) {
+    let tree = match resvg::usvg::Tree::from_str(svg, opt) {
+        Ok(t) => t,
+        Err(_) => {
+            tracing::debug!("overlay SVG failed to parse, skipping");
+            return;
+        }
+    };
+    // Overlay rasterizes onto a transparent canvas; composite that onto `base`.
+    scratch.data_mut().fill(0);
+    resvg::render(
+        &tree,
+        resvg::tiny_skia::Transform::identity(),
+        &mut scratch.as_mut(),
+    );
+    base.draw_pixmap(
+        0,
+        0,
+        scratch.as_ref(),
+        &resvg::tiny_skia::PixmapPaint::default(),
+        resvg::tiny_skia::Transform::identity(),
+        None,
+    );
 }
 
 #[cfg(test)]

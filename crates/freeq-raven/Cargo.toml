@@ -15,7 +15,7 @@ path = "src/main.rs"
 
 [dependencies]
 freeq-agent-kit = { git = "https://github.com/chad/freeq.git", rev = "0bd770bc91078c20d25f552995ca127f3fcfcbf3", package = "freeq-agent-kit" }
-freeq-av = { git = "https://github.com/chad/freeq.git", rev = "0bd770bc91078c20d25f552995ca127f3fcfcbf3", package = "freeq-av" }
+freeq-av = { path = "../freeq-av" }
 # Identity + IRC + crypto for SASL
 freeq-sdk = { git = "https://github.com/chad/freeq.git", rev = "0bd770bc91078c20d25f552995ca127f3fcfcbf3", package = "freeq-sdk", default-features = false, features = ["ring", "rustls-tls", "websocket"] }
 ed25519-dalek = { version = "2", features = ["rand_core"] }

@@ -57,7 +57,8 @@ pub fn by_name(name: &str) -> Option<&'static CharacterProfile> {
 /// configured local Alexandria/Fabro/Codex tool runner rather than
 /// invented in speech.
 pub const RAVEN: CharacterProfile = CharacterProfile {
-    voice_id: "JBFqnCBsd6RMkjVDRZzb",
+    // Matches Revenant's "Alexandria · bronze coin" style voice.
+    voice_id: "aj0fZfXTBc7E3By4X8L2",
     speed_multiplier: 1.04,
     default_emotion: "focus",
     system_prompt: "You are Raven, a live voice and chat agent in a \

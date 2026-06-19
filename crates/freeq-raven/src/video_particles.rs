@@ -24,11 +24,10 @@
 //!
 //! ## What's not wired (yet)
 //!
-//! - Scene cards, whiteboards, ambient HUD, vision PiP, EQ strip —
-//!   these are SVG-only overlays. On the particles backend
-//!   `show_scene` / `show_board` / `set_vision_thumb` / `set_ambient`
-//!   become no-ops in the user-visible output (the SVG-side state
-//!   still updates but isn't rendered). Composite mode is future work.
+//! - EQ strip and state sticker — these belong to the full SVG presence
+//!   renderer and would fight the particle face. Scene cards,
+//!   whiteboards, ambient HUD, and vision PiP are composited as a shared
+//!   overlay layer.
 //! - Lip-sync mouth — the SVG face's `level`-driven mouth aperture
 //!   does not yet drive the particle field. We pass `level` into the
 //!   per-frame breath so the whole face pulses with her speech, but a
@@ -43,10 +42,12 @@ use ghostly::{
     characters as gho_characters,
 };
 use iroh_live::media::format::VideoFrame;
-use resvg::tiny_skia::{Pixmap, PixmapPaint, Transform};
+use resvg::tiny_skia::Pixmap;
 use resvg::usvg;
 
-use crate::video::{VIDEO_H, VIDEO_W, VideoTile, overlay_svg_for_particles};
+use crate::video::{
+    VIDEO_H, VIDEO_W, VideoTile, composite_overlay, overlay_svg_for_visual_backend,
+};
 
 const FPS: u64 = 15;
 /// Particle count at 1280×720. Roughly 2.3× the 12K we used at 360p
@@ -220,23 +221,8 @@ pub(crate) fn render_loop(tile: VideoTile, character_name: &str) {
         // of the particle face. Skips entirely when there's nothing
         // to draw (quiet listening with no ambient pick yet).
         let mut composed = pixmap.clone();
-        if let Some(overlay_svg) = overlay_svg_for_particles(&tile, t) {
-            if let Ok(tree) = usvg::Tree::from_str(&overlay_svg, &usvg_opt) {
-                // Clear scratch (overlay rasterizes onto a transparent
-                // canvas; we composite that onto the particle pixmap).
-                overlay_pixmap.data_mut().fill(0);
-                resvg::render(&tree, Transform::identity(), &mut overlay_pixmap.as_mut());
-                composed.draw_pixmap(
-                    0,
-                    0,
-                    overlay_pixmap.as_ref(),
-                    &PixmapPaint::default(),
-                    Transform::identity(),
-                    None,
-                );
-            } else {
-                tracing::debug!("particle overlay SVG failed to parse, skipping");
-            }
+        if let Some(overlay_svg) = overlay_svg_for_visual_backend(&tile, t) {
+            composite_overlay(&mut composed, &mut overlay_pixmap, &overlay_svg, &usvg_opt);
         }
 
         // Publish the frame. Match the iroh-live frame format the SVG

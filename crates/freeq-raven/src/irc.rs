@@ -381,7 +381,8 @@ pub struct RunConfig {
     /// Toggle with `--no-ambient` on the CLI.
     pub ambient_enabled: bool,
     /// Video tile renderer choice. `svg` = the rich freeq presence;
-    /// `particles` = ghostly particle face.
+    /// `coin` / `alexandria` = pulsing raven coin; `particles` =
+    /// ghostly particle face.
     pub render_backend: String,
     /// Character profile name; also selects the particle face when
     /// `render_backend == "particles"`.
@@ -435,7 +436,8 @@ pub(crate) struct SharedConfig {
     pub(crate) proactive_enabled: bool,
     /// Whether the ambient monitor runs (`--no-ambient` disables it).
     pub(crate) ambient_enabled: bool,
-    /// Renderer choice — `"svg"` (default) or `"particles"`.
+    /// Renderer choice — `"coin"` / `"alexandria"` (default), `"svg"`,
+    /// or `"particles"`.
     pub(crate) render_backend: String,
     /// Character profile name; also selects the particle face when
     /// `render_backend == "particles"`.
@@ -2133,7 +2135,9 @@ async fn start_transcription(
     // The agent's video tile. The renderer thread runs for the call's
     // lifetime, producing audio-reactive frames; the audio path shares
     // the loudness cell so the presence pulses with Raven's voice.
-    let backend = match cfg.render_backend.as_str() {
+    let render_backend = cfg.render_backend.trim().to_ascii_lowercase();
+    let backend = match render_backend.as_str() {
+        "coin" | "alexandria" => crate::video::Backend::Coin,
         "particles" => crate::video::Backend::Particles {
             character: cfg.ghostly_character.clone(),
         },

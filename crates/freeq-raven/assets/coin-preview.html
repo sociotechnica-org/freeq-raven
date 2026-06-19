@@ -1,0 +1,282 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Raven Coin Preview</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      gap: 18px;
+      padding: 24px;
+      background: #080b10;
+      color: #e7edf7;
+    }
+
+    .stage {
+      width: min(1280px, calc(100vw - 48px));
+      aspect-ratio: 16 / 9;
+      position: relative;
+      overflow: hidden;
+      background: #000;
+      border: 1px solid #1a2633;
+      box-shadow: 0 28px 80px rgba(0, 0, 0, .55);
+    }
+
+    .state-video {
+      width: 100%;
+      height: 100%;
+      position: absolute;
+      inset: 0;
+      display: block;
+      object-fit: contain;
+      user-select: none;
+    }
+
+    .controls {
+      width: min(1280px, calc(100vw - 48px));
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+      flex-wrap: wrap;
+    }
+
+    .voice-test {
+      width: min(1280px, calc(100vw - 48px));
+      display: grid;
+      grid-template-columns: minmax(240px, 1fr) auto;
+      gap: 10px;
+      align-items: center;
+    }
+
+    .seg {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    button {
+      height: 34px;
+      padding: 0 12px;
+      border: 1px solid #273544;
+      background: #101722;
+      color: #d9e6f7;
+      border-radius: 6px;
+      font: inherit;
+      cursor: pointer;
+    }
+
+    button[aria-pressed="true"] {
+      border-color: #42e6de;
+      background: #15333a;
+      color: #9ffff8;
+    }
+
+    label {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      color: #9eb0c6;
+      font-size: 13px;
+    }
+
+    input {
+      width: 180px;
+      accent-color: #42e6de;
+    }
+
+    .voice-test input,
+    .voice-audio {
+      grid-column: 1 / -1;
+      width: 100%;
+      height: 34px;
+    }
+
+    .voice-status {
+      width: min(1280px, calc(100vw - 48px));
+      min-height: 18px;
+      color: #8fa3bc;
+      font-size: 12px;
+    }
+
+    @media (max-width: 760px) {
+      .voice-test {
+        grid-template-columns: 1fr auto;
+      }
+    }
+
+  </style>
+</head>
+<body>
+  <main class="stage" aria-label="Raven coin video tile preview">
+    <video id="coinVideo" class="state-video" src="raven-idle-loop.mp4" autoplay muted loop playsinline preload="auto"></video>
+  </main>
+
+  <section class="controls">
+    <div class="seg" id="modes" aria-label="Preview state">
+      <button type="button" data-mode="idle" aria-pressed="true">Idle</button>
+      <button type="button" data-mode="listening">Listening</button>
+      <button type="button" data-mode="thinking">Thinking</button>
+      <button type="button" data-mode="speaking">Speaking</button>
+      <button type="button" data-mode="vision">Vision</button>
+    </div>
+  </section>
+
+  <section class="voice-test" aria-label="Voice test">
+    <input id="voiceText" value="Raven online. I can hear the room and follow chat.">
+    <button type="button" id="stopVoice">Stop</button>
+    <audio id="voiceAudio" class="voice-audio" controls preload="none"></audio>
+  </section>
+  <div class="voice-status" id="voiceStatus"></div>
+
+  <script>
+    const RAVEN_VOICE_ID = "aj0fZfXTBc7E3By4X8L2";
+    const stateVideos = {
+      idle: "raven-idle-loop.mp4",
+      listening: "raven-listening-loop.mp4",
+      thinking: "raven-thinking-loop.mp4",
+      speaking: "raven-speaking-loop.mp4",
+      vision: "raven-vision-loop.mp4"
+    };
+
+    const buttons = [...document.querySelectorAll("button[data-mode]")];
+    const coinVideo = document.querySelector("#coinVideo");
+    const voiceText = document.querySelector("#voiceText");
+    const stopVoiceButton = document.querySelector("#stopVoice");
+    const voiceStatus = document.querySelector("#voiceStatus");
+    const voiceAudio = document.querySelector("#voiceAudio");
+    let mode = "idle";
+    let activeObjectUrl = null;
+
+    const preloadedStateVideos = Object.values(stateVideos).map((src) => {
+      const video = document.createElement("video");
+      video.src = src;
+      video.preload = "auto";
+      video.muted = true;
+      return video;
+    });
+
+    function apply() {
+      const src = stateVideos[mode] || stateVideos.idle;
+      if (!coinVideo.currentSrc.endsWith(src)) {
+        coinVideo.src = src;
+        coinVideo.load();
+      }
+      buttons.forEach((button) => {
+        button.setAttribute("aria-pressed", String(button.dataset.mode === mode));
+      });
+      coinVideo.play().catch(() => {});
+    }
+
+    coinVideo.addEventListener("canplay", () => {
+      coinVideo.play().catch(() => {});
+    }, { once: true });
+
+    buttons.forEach((button) => {
+      button.addEventListener("click", () => {
+        mode = button.dataset.mode;
+        apply();
+        if (mode === "speaking") {
+          speakRaven();
+        } else {
+          stopVoice();
+        }
+      });
+    });
+    stopVoiceButton.addEventListener("click", () => stopVoice({ resetMode: true }));
+
+    function setVoiceStatus(text) {
+      voiceStatus.textContent = text;
+    }
+
+    function startVoiceActivity() {
+      mode = "speaking";
+      apply();
+    }
+
+    function stopVoiceActivity(resetMode = false) {
+      if (resetMode) {
+        mode = "idle";
+      }
+      apply();
+    }
+
+    function stopVoice({ resetMode = false } = {}) {
+      voiceAudio.pause();
+      voiceAudio.removeAttribute("src");
+      voiceAudio.load();
+      if (activeObjectUrl) {
+        URL.revokeObjectURL(activeObjectUrl);
+        activeObjectUrl = null;
+      }
+      stopVoiceActivity(resetMode);
+      setVoiceStatus("");
+    }
+
+    async function speakRaven() {
+      stopVoice();
+      startVoiceActivity();
+      const text = voiceText.value.trim() || "Raven online.";
+      setVoiceStatus(`Requesting Raven voice ${RAVEN_VOICE_ID}...`);
+
+      try {
+        const response = await fetch("/voice-test", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ text, voiceId: RAVEN_VOICE_ID })
+        });
+        if (!response.ok) {
+          const detail = await response.text();
+          throw new Error(detail || `voice proxy returned ${response.status}`);
+        }
+        const source = response.headers.get("x-voice-source") || "elevenlabs";
+        const blob = await response.blob();
+        activeObjectUrl = URL.createObjectURL(blob);
+        voiceAudio.src = activeObjectUrl;
+        voiceAudio.load();
+        const playingStatus = source === "elevenlabs"
+          ? "Playing Raven voice."
+          : "Playing voice.";
+        try {
+          await voiceAudio.play();
+          setVoiceStatus(playingStatus);
+        } catch {
+          setVoiceStatus(`${playingStatus} Press play in the audio control if autoplay is blocked.`);
+        }
+      } catch (error) {
+        stopVoiceActivity();
+        setVoiceStatus(`Raven voice failed: ${error.message}`);
+      }
+    }
+
+    voiceAudio.addEventListener("play", () => {
+      startVoiceActivity();
+    });
+    voiceAudio.addEventListener("pause", () => {
+      stopVoiceActivity();
+    });
+    voiceAudio.addEventListener("ended", () => {
+      stopVoiceActivity(true);
+      setVoiceStatus("Voice complete.");
+    });
+    voiceAudio.addEventListener("error", () => {
+      stopVoiceActivity(true);
+      setVoiceStatus("Audio playback failed.");
+    });
+    apply();
+  </script>
+</body>
+</html>

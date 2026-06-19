@@ -1778,7 +1778,6 @@ source = "git+https://github.com/chad/freeq.git?rev=0bd770bc91078c20d25f552995ca
 [[package]]
 name = "freeq-av"
 version = "0.1.0"
-source = "git+https://github.com/chad/freeq.git?rev=0bd770bc91078c20d25f552995ca127f3fcfcbf3#0bd770bc91078c20d25f552995ca127f3fcfcbf3"
 dependencies = [
  "anyhow",
  "bytes",

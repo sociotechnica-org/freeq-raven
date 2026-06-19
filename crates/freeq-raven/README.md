@@ -40,6 +40,7 @@ cargo run --release -p freeq-raven -- \
   --channel '#alexandria' \
   --name raven \
   --nick Raven \
+  --render-backend coin \
   --ghostly-character raven \
   --answer-provider inception \
   --answer-model mercury-2 \
