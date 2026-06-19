@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
 #[derive(Debug, Clone)]
 pub struct ClaudeAgentConfig {
@@ -121,11 +121,37 @@ pub async fn ask(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    cmd.kill_on_drop(true);
     if let Some(workdir) = &cfg.workdir {
         cmd.current_dir(workdir);
     }
 
     let mut child = cmd.spawn().context("starting claude agent sidecar")?;
+    let stdout = child
+        .stdout
+        .take()
+        .context("capturing claude agent sidecar stdout")?;
+    let stderr = child
+        .stderr
+        .take()
+        .context("capturing claude agent sidecar stderr")?;
+    let stdout_task = tokio::spawn(async move {
+        let mut stdout = stdout;
+        let mut output = Vec::new();
+        stdout.read_to_end(&mut output).await.map(|_| output)
+    });
+    let stderr_task = tokio::spawn(async move {
+        let mut lines = BufReader::new(stderr).lines();
+        let mut captured = String::new();
+        while let Some(line) = lines.next_line().await? {
+            if !captured.is_empty() {
+                captured.push('\n');
+            }
+            captured.push_str(&line);
+            tracing::info!(line = %line, "claude agent sidecar");
+        }
+        Ok::<String, std::io::Error>(captured)
+    });
     if let Some(mut stdin) = child.stdin.take() {
         stdin
             .write_all(&payload)
@@ -137,26 +163,61 @@ pub async fn ask(
             .context("closing claude agent stdin")?;
     }
 
-    let output = tokio::time::timeout(cfg.timeout, child.wait_with_output())
-        .await
-        .context("claude agent sidecar timed out")?
-        .context("waiting for claude agent sidecar")?;
+    let status = match tokio::time::timeout(cfg.timeout, child.wait()).await {
+        Ok(result) => result.context("waiting for claude agent sidecar")?,
+        Err(_) => {
+            let _ = child.kill().await;
+            let stderr = stderr_task
+                .await
+                .ok()
+                .and_then(|result| result.ok())
+                .unwrap_or_default();
+            anyhow::bail!(
+                "claude agent sidecar timed out after {}s{}",
+                cfg.timeout.as_secs(),
+                if stderr.trim().is_empty() {
+                    String::new()
+                } else {
+                    format!(": {}", stderr.trim())
+                }
+            );
+        }
+    };
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    if !output.status.success() {
-        anyhow::bail!(
-            "claude agent sidecar exited {}: {}",
-            output.status,
-            stderr.trim()
-        );
+    let stdout_bytes = stdout_task
+        .await
+        .context("joining claude agent stdout task")?
+        .context("reading claude agent sidecar stdout")?;
+    let stderr = stderr_task
+        .await
+        .context("joining claude agent stderr task")?
+        .context("reading claude agent sidecar stderr")?;
+    let stdout = String::from_utf8_lossy(&stdout_bytes);
+    if !status.success() {
+        anyhow::bail!("claude agent sidecar exited {}: {}", status, stderr.trim());
     }
-    let line = stdout
-        .lines()
-        .find(|line| !line.trim().is_empty())
-        .context("claude agent sidecar returned no JSON")?;
-    let parsed: SidecarResponse =
-        serde_json::from_str(line).context("decoding claude agent sidecar response")?;
+    let mut parsed = None;
+    let mut last_error = None;
+    for line in stdout.lines().filter(|line| !line.trim().is_empty()) {
+        match serde_json::from_str::<SidecarResponse>(line) {
+            Ok(response) => parsed = Some(response),
+            Err(error) => {
+                tracing::warn!(
+                    error = ?error,
+                    chars = line.chars().count(),
+                    "ignoring non-JSON claude agent sidecar stdout"
+                );
+                last_error = Some(error);
+            }
+        }
+    }
+    let parsed = parsed.ok_or_else(|| {
+        if let Some(error) = last_error {
+            anyhow::anyhow!("decoding claude agent sidecar response: {error}")
+        } else {
+            anyhow::anyhow!("claude agent sidecar returned no JSON")
+        }
+    })?;
     if !parsed.ok {
         anyhow::bail!(
             "claude agent sidecar failed: {}",

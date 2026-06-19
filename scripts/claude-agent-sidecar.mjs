@@ -37,6 +37,17 @@ function jsonLine(value) {
   process.stdout.write(`${JSON.stringify(value)}\n`);
 }
 
+function trace(event, fields = {}) {
+  if (process.env.RAVEN_AGENT_TRACE === "0") return;
+  process.stderr.write(
+    `${JSON.stringify({
+      event: `claude_agent.${event}`,
+      ts: new Date().toISOString(),
+      ...fields,
+    })}\n`,
+  );
+}
+
 function textBlocks(message) {
   const content = message?.message?.content ?? [];
   return content
@@ -116,6 +127,24 @@ function normalizeNames(values) {
     .filter((value) => typeof value === "string" && value.length > 0);
 }
 
+function summarizeContent(content) {
+  if (!Array.isArray(content)) {
+    return { blocks: 0, blockTypes: [], textChars: 0, toolNames: [] };
+  }
+  const blockTypes = [];
+  const toolNames = [];
+  let textChars = 0;
+  for (const block of content) {
+    if (!block || typeof block !== "object") continue;
+    if (typeof block.type === "string") blockTypes.push(block.type);
+    if (block.type === "text" && typeof block.text === "string") {
+      textChars += block.text.length;
+    }
+    if (typeof block.name === "string") toolNames.push(block.name);
+  }
+  return { blocks: content.length, blockTypes, textChars, toolNames };
+}
+
 function requireAnthropicApiKey() {
   if (!process.env.ANTHROPIC_API_KEY || !process.env.ANTHROPIC_API_KEY.trim()) {
     throw new Error("ANTHROPIC_API_KEY is required for Claude Agent SDK sidecar");
@@ -159,16 +188,50 @@ async function handleReal(req) {
     options.allowDangerouslySkipPermissions = true;
   }
 
+  trace("turn_start", {
+    channel: req.channel || null,
+    source: req.source || null,
+    asker: req.asker || null,
+    cwd,
+    maxTurns: options.maxTurns,
+    model: options.model || null,
+    resume: Boolean(req.sessionId),
+    pluginPath: pluginPath || null,
+  });
+
   let resultMessage = null;
   let initMessage = null;
   let assistantText = "";
   for await (const message of query({ prompt: buildPrompt(req), options })) {
     if (message.type === "system" && message.subtype === "init") {
       initMessage = message;
+      trace("init", {
+        sessionId: message.session_id || null,
+        model: message.model || null,
+        plugins: normalizePlugins(message.plugins).map((plugin) => plugin.name),
+        skills: normalizeNames(message.skills),
+        slashCommands: normalizeNames(message.slash_commands),
+      });
     } else if (message.type === "assistant") {
+      trace("assistant", summarizeContent(message?.message?.content));
       assistantText += textBlocks(message);
+    } else if (message.type === "user") {
+      trace("user", summarizeContent(message?.message?.content));
     } else if (message.type === "result") {
       resultMessage = message;
+      trace("result", {
+        subtype: message.subtype || null,
+        sessionId: message.session_id || null,
+        resultChars:
+          typeof message.result === "string" ? message.result.length : 0,
+        totalCostUsd: message.total_cost_usd ?? null,
+        durationMs: message.duration_ms ?? null,
+      });
+    } else {
+      trace("event", {
+        type: message?.type || null,
+        subtype: message?.subtype || null,
+      });
     }
   }
 
@@ -176,6 +239,12 @@ async function handleReal(req) {
     throw new Error("Claude Agent SDK returned no result message");
   }
   if (resultMessage.subtype !== "success") {
+    trace("turn_finish", {
+      ok: false,
+      error: resultMessage.subtype || "claude_agent_error",
+      textChars: (resultMessage.result || assistantText || "").length,
+      sessionId: resultMessage.session_id || initMessage?.session_id || req.sessionId || null,
+    });
     return baseResponse(req, {
       ok: false,
       error: resultMessage.subtype || "claude_agent_error",
@@ -186,6 +255,12 @@ async function handleReal(req) {
       slashCommands: normalizeNames(initMessage?.slash_commands),
     });
   }
+
+  trace("turn_finish", {
+    ok: true,
+    textChars: (resultMessage.result || assistantText || "").length,
+    sessionId: resultMessage.session_id || initMessage?.session_id || req.sessionId || null,
+  });
 
   return baseResponse(req, {
     text: resultMessage.result || assistantText,
