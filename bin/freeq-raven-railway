@@ -124,7 +124,7 @@ start_ax2_runtime() {
 	local ax2_log
 	local ax2_status
 
-	ax2_log="$(mktemp /tmp/freeq-raven-ax2.XXXXXX.log)"
+	ax2_log="$(mktemp "${TMPDIR:-/tmp}/freeq-raven-ax2.XXXXXX")"
 	"$AX2_BIN" start all \
 		--host "$ALEXANDRIA_VIEWER_HOST" \
 		--port "$ALEXANDRIA_VIEWER_PORT" \
