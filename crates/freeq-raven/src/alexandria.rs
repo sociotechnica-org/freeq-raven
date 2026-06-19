@@ -218,7 +218,7 @@ async fn handle_submission_result(
             let _ = handle
                 .privmsg(
                     channel,
-                    &format!("{asker}: got it. I sent that back into the play."),
+                    &format!("{asker}: sent your feedback back to the play."),
                 )
                 .await;
         }
@@ -481,23 +481,21 @@ async fn post_review_notice(
     let director = read_runtime_file(config, "for-the-director.md").await;
     let draft = read_draft(config, feedback).await;
     let mut message = String::new();
-    message.push_str("I've got a Frame the Problem checkpoint for you.\n");
-    if let Some(director) = director.as_deref() {
-        message.push_str("\nHere's the bit to react to:\n");
+    message.push_str("Frame the Problem is ready for your feedback.\n");
+    message.push_str(&format!("Question: {}\n", feedback.prompt));
+    if let Some(director) = director {
+        message.push_str("\nFor you to react to:\n");
         message.push_str(&excerpt_chars(&director, 1400));
         message.push('\n');
     }
-    if let Some(draft) = draft.as_deref() {
+    if let Some(draft) = draft {
         message.push_str("\nCurrent draft:\n");
         message.push_str(&excerpt_chars(&draft, 1800));
         message.push('\n');
     }
-    if director.is_none() && draft.is_none() {
-        message.push_str(
-            "\nThe play is waiting on your take. I could not read the draft text from here, but I can still send your reaction back into the run.\n",
-        );
-    }
-    message.push_str("\nIf this works, say `Raven, approve`. Otherwise just tell me what you want changed and I'll send it back.");
+    message.push_str(
+        "\nReply `Raven, approve` to finish, or `Raven, revise: <feedback>` and I will send it back to the play.",
+    );
     post_long(handle, channel, &message).await;
 }
 
@@ -581,9 +579,8 @@ fn interpret_feedback_reply(text: &str, choices: &[String]) -> Option<FeedbackAc
         return None;
     }
     let lower = trimmed.to_ascii_lowercase();
-    let normalized = lower.trim_matches(|ch: char| ch.is_ascii_punctuation());
 
-    if is_approve_reply(normalized) {
+    if is_approve_reply(&lower) {
         return match approve_choice(choices) {
             Some(choice) => Some(FeedbackAction::ApproveSelect(choice)),
             None if choices.is_empty() => Some(FeedbackAction::ApproveYes),
@@ -616,25 +613,16 @@ fn interpret_feedback_reply(text: &str, choices: &[String]) -> Option<FeedbackAc
         return Some(FeedbackAction::MissingRevisionText);
     }
 
-    Some(FeedbackAction::Revise(trimmed.to_string()))
+    None
 }
 
-fn is_approve_reply(normalized: &str) -> bool {
-    matches!(
-        normalized,
-        "approve"
-            | "approved"
-            | "ship it"
-            | "looks good"
-            | "good to go"
-            | "works for me"
-            | "this works"
-            | "lgtm"
-            | "yes"
-            | "yep"
-            | "yeah"
-    ) || normalized.starts_with("approve ")
-        || normalized.starts_with("approved ")
+fn is_approve_reply(lower: &str) -> bool {
+    lower == "approve"
+        || lower == "approved"
+        || lower == "ship it"
+        || lower == "looks good"
+        || lower.starts_with("approve ")
+        || lower.starts_with("approved ")
 }
 
 fn approve_choice(choices: &[String]) -> Option<String> {
@@ -778,11 +766,8 @@ mod tests {
     }
 
     #[test]
-    fn plain_feedback_becomes_revision_text() {
-        expect_action(
-            interpret_feedback_reply("make the hosted angle sharper", &[]),
-            FeedbackAction::Revise("make the hosted angle sharper".to_string()),
-        );
+    fn unrelated_reply_falls_through_to_normal_qa() {
+        assert!(interpret_feedback_reply("what do you think?", &[]).is_none());
     }
 
     fn expect_action(actual: Option<FeedbackAction>, expected: FeedbackAction) {
