@@ -42,6 +42,17 @@ impl Decision {
         }
         out
     }
+
+    /// One-line human rendering: `who — what`, with an optional
+    /// `(by <when>)` deadline suffix. Shared by the session-end IRC
+    /// read-back and the persisted Markdown transcript, which differ
+    /// only in the leading bullet glyph they prepend.
+    pub fn render_line(&self) -> String {
+        match &self.when {
+            Some(w) => format!("{} — {} (by {})", self.who, self.what, w),
+            None => format!("{} — {}", self.who, self.what),
+        }
+    }
 }
 
 /// Naïve sentence splitter — period/question/exclamation. Captures
@@ -205,6 +216,14 @@ mod tests {
         assert_eq!(d.len(), 2, "got {d:?}");
         assert!(d[0].what.contains("ship"));
         assert!(d[1].what.contains("write the post"));
+    }
+
+    #[test]
+    fn render_line_with_and_without_deadline() {
+        let with = Decision::extract("chad", "let's ship the build by friday");
+        assert_eq!(with[0].render_line(), "chad — ship the build (by friday)");
+        let without = Decision::extract("chad", "I'll handle the deploy");
+        assert_eq!(without[0].render_line(), "chad — handle the deploy");
     }
 
     #[test]
