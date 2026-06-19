@@ -174,6 +174,28 @@ fn missing_answer_config(cfg: &SharedConfig) -> Option<String> {
 const SESSION_CONTEXT_QA_TAIL_LINES: usize = 200;
 
 fn record_session_line(cfg: &SharedConfig, channel: &str, source: &str, speaker: &str, text: &str) {
+    record_session_line_inner(cfg, channel, source, speaker, text, None);
+}
+
+fn record_session_line_bounded(
+    cfg: &SharedConfig,
+    channel: &str,
+    source: &str,
+    speaker: &str,
+    text: &str,
+    max_lines: usize,
+) {
+    record_session_line_inner(cfg, channel, source, speaker, text, Some(max_lines));
+}
+
+fn record_session_line_inner(
+    cfg: &SharedConfig,
+    channel: &str,
+    source: &str,
+    speaker: &str,
+    text: &str,
+    max_lines: Option<usize>,
+) {
     let text = text.trim();
     if text.is_empty() {
         return;
@@ -184,9 +206,12 @@ fn record_session_line(cfg: &SharedConfig, channel: &str, source: &str, speaker:
         .expect("session context poisoned");
     let lines = guard.entry(channel.to_string()).or_default();
     lines.push(format!("{speaker} [{source}]: {text}"));
-    // No cap on storage: the full session history is retained so the
-    // end-of-call transcript + summary are complete. Live Q&A bounds its
-    // own prompt with `session_context_tail`.
+    if let Some(max_lines) = max_lines {
+        let overflow = lines.len().saturating_sub(max_lines);
+        if overflow > 0 {
+            lines.drain(0..overflow);
+        }
+    }
 }
 
 fn session_context_snapshot(cfg: &SharedConfig, channel: &str) -> String {
@@ -220,10 +245,27 @@ fn clear_session_context(cfg: &SharedConfig, channel: &str) {
         .remove(channel);
 }
 
+fn session_transcript_workdir(cfg: &SharedConfig) -> Option<std::path::PathBuf> {
+    let agent = cfg.claude_agent.as_ref()?;
+    if let Some(workdir) = &agent.workdir {
+        return Some(workdir.clone());
+    }
+    match std::env::current_dir() {
+        Ok(path) => Some(path),
+        Err(e) => {
+            tracing::warn!(
+                error = ?e,
+                "could not resolve current dir for session transcript"
+            );
+            None
+        }
+    }
+}
+
 /// Persist the end-of-session transcript + decision read-back to a
-/// timestamped Markdown file in `workdir` (the `RAVEN_TOOL_WORKDIR`
-/// target repo) so the conversation becomes a durable input the
-/// post-call factory run can consume. Returns the written path.
+/// timestamped Markdown file in `workdir` (the Claude agent target repo)
+/// so the conversation becomes a durable input the post-call factory run
+/// can consume. Returns the written path.
 ///
 /// The transcript is the full rolling session context (no cap); the
 /// decisions are the complete per-channel commitment log. Best-effort —
@@ -244,7 +286,9 @@ fn write_session_transcript(
     let path = workdir.join(format!("session-{slug}-{file_ts}.md"));
 
     let mut out = String::new();
-    out.push_str(&format!("# Session transcript — {channel}\n\nEnded: {ts}\n\n"));
+    out.push_str(&format!(
+        "# Session transcript — {channel}\n\nEnded: {ts}\n\n"
+    ));
 
     out.push_str("## Decisions\n\n");
     if decisions.is_empty() {
@@ -267,11 +311,11 @@ fn write_session_transcript(
         out.push('\n');
     }
 
-    std::fs::OpenOptions::new()
+    let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(&path)?
-        .write_all(out.as_bytes())?;
+        .open(&path)?;
+    file.write_all(out.as_bytes())?;
     Ok(path)
 }
 use crate::imagegen::AiImageConfig;
@@ -897,11 +941,12 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
                             }
                         }
 
-                        // Persist the transcript + decisions to the target
-                        // repo (RAVEN_TOOL_WORKDIR) so the conversation
-                        // becomes a durable input for the post-call factory
-                        // run. Best-effort; failures are logged, not fatal.
-                        if let Some(workdir) = &cfg.tool_workdir {
+                        // Persist the transcript + decisions to the Claude
+                        // agent target repo so the conversation becomes a
+                        // durable input for the post-call factory run.
+                        // Best-effort; failures are logged, not fatal.
+                        let transcript_workdir = session_transcript_workdir(&cfg);
+                        if let Some(workdir) = transcript_workdir.as_deref() {
                             if !transcript.is_empty() || !drained.is_empty() {
                                 match write_session_transcript(
                                     workdir,
@@ -914,7 +959,10 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
                                         let _ = handle
                                             .privmsg(
                                                 &channel_for_post,
-                                                &format!("[transcript] saved to {}", path.display()),
+                                                &format!(
+                                                    "[transcript] saved to {}",
+                                                    path.display()
+                                                ),
                                             )
                                             .await;
                                     }
@@ -1020,7 +1068,23 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
                     }
                     continue;
                 }
-                record_session_line(&cfg, &target, "chat", &from, &text);
+                let retain_full_session_context = active
+                    .lock()
+                    .await
+                    .as_ref()
+                    .map_or(false, |call| call.channel.eq_ignore_ascii_case(&target));
+                if retain_full_session_context {
+                    record_session_line(&cfg, &target, "chat", &from, &text);
+                } else {
+                    record_session_line_bounded(
+                        &cfg,
+                        &target,
+                        "chat",
+                        &from,
+                        &text,
+                        SESSION_CONTEXT_QA_TAIL_LINES,
+                    );
+                }
                 let Some(question) = address_with_aliases(&text, &cfg.nick) else {
                     continue;
                 };
@@ -1058,7 +1122,16 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
                 let asker = from.clone();
                 tokio::spawn(async move {
                     answer_and_speak(
-                        cfg, handle, channel, asker, question, transcript, None, None, None,
+                        cfg,
+                        handle,
+                        channel,
+                        asker,
+                        question,
+                        transcript,
+                        None,
+                        None,
+                        None,
+                        retain_full_session_context,
                     )
                     .await;
                 });
@@ -1087,6 +1160,7 @@ async fn answer_and_speak(
     video: Option<VideoTile>,
     // The asker's own video (their screen/camera), for visual questions.
     asker_video: Option<VideoHandle>,
+    retain_full_session_context: bool,
 ) {
     if let Some(reason) = missing_answer_config(&cfg) {
         let _ = handle
@@ -1436,7 +1510,18 @@ sharpen the thread. Do NOT address yourself."
     // Log the full answer text — invaluable for debugging when she's
     // saying something weird (e.g. reading image alt attributes).
     tracing::info!(text = %answer.text, "answer text (sent to TTS)");
-    record_session_line(&cfg, &channel, "agent", &cfg.nick, &answer.text);
+    if retain_full_session_context {
+        record_session_line(&cfg, &channel, "agent", &cfg.nick, &answer.text);
+    } else {
+        record_session_line_bounded(
+            &cfg,
+            &channel,
+            "agent",
+            &cfg.nick,
+            &answer.text,
+            SESSION_CONTEXT_QA_TAIL_LINES,
+        );
+    }
 
     // Deterministic peer hand-off (discussion mode). The LLM's
     // answer often ends with addressing a peer ("Utopia, your
@@ -2379,7 +2464,11 @@ async fn transcribe_participant(
                                     call.speaker.clear();
                                     call.last_answer = Some(Instant::now());
                                     Some((
-                                        session_context_tail(&cfg, &channel, SESSION_CONTEXT_QA_TAIL_LINES),
+                                        session_context_tail(
+                                            &cfg,
+                                            &channel,
+                                            SESSION_CONTEXT_QA_TAIL_LINES,
+                                        ),
                                         call.speaker.clone(),
                                         call.video.clone(),
                                     ))
@@ -2395,7 +2484,11 @@ async fn transcribe_participant(
                                 {
                                     call.last_answer = Some(Instant::now());
                                     Some((
-                                        session_context_tail(&cfg, &channel, SESSION_CONTEXT_QA_TAIL_LINES),
+                                        session_context_tail(
+                                            &cfg,
+                                            &channel,
+                                            SESSION_CONTEXT_QA_TAIL_LINES,
+                                        ),
                                         call.speaker.clone(),
                                         call.video.clone(),
                                     ))
@@ -2418,6 +2511,7 @@ async fn transcribe_participant(
                                 Some(speaker),
                                 Some(video),
                                 Some(asker_video),
+                                true,
                             )
                             .await;
                         }
