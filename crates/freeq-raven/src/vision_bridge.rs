@@ -228,7 +228,7 @@ impl ParticipantFrameSource {
         match &self.source {
             FrameSource::Live(video) => match video.latest_status() {
                 VideoFrameStatus::Fresh(_) => (true, false),
-                VideoFrameStatus::Stale { .. } => (false, true),
+                VideoFrameStatus::Stale => (false, true),
                 VideoFrameStatus::Missing => (false, false),
             },
             #[cfg(test)]
@@ -268,7 +268,7 @@ impl ParticipantFrameSource {
                         }
                     }
                 }
-                VideoFrameStatus::Stale { .. } => VisionBridgeResponse::failure(
+                VideoFrameStatus::Stale => VisionBridgeResponse::failure(
                     VisionBridgeReason::StaleFrame,
                     channel,
                     Some(&self.display_name),

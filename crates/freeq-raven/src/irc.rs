@@ -1621,7 +1621,7 @@ sharpen the thread. Do NOT address yourself."
                 source: turn_source.to_string(),
                 question: question.clone(),
                 session_context: transcript.clone(),
-                system_prompt: effective_system_prompt.clone(),
+                system_prompt: effective_system_prompt,
                 vision_bridge,
             },
         )

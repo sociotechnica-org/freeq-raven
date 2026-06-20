@@ -118,17 +118,13 @@ const FRAME_FRESHNESS: Duration = Duration::from_secs(10);
 pub struct VideoFrameSnapshot {
     pub frame: VideoFrame,
     pub captured_at: SystemTime,
-    pub age: Duration,
 }
 
 /// Status of a participant's latest decoded video frame.
 #[derive(Clone)]
 pub enum VideoFrameStatus {
     Fresh(VideoFrameSnapshot),
-    Stale {
-        captured_at: SystemTime,
-        age: Duration,
-    },
+    Stale,
     Missing,
 }
 
@@ -139,33 +135,29 @@ impl VideoHandle {
     pub fn latest(&self) -> Option<VideoFrame> {
         match self.latest_status() {
             VideoFrameStatus::Fresh(snapshot) => Some(snapshot.frame),
-            VideoFrameStatus::Stale { .. } | VideoFrameStatus::Missing => None,
+            VideoFrameStatus::Stale | VideoFrameStatus::Missing => None,
         }
     }
 
     /// The current frame status, including stale frames that
     /// [`latest`](Self::latest) intentionally hides from callers.
+    /// The frame is cloned only on the fresh path — status-only
+    /// callers (freshness checks) never touch the pixel data.
     pub fn latest_status(&self) -> VideoFrameStatus {
-        self.latest
-            .lock()
-            .ok()
-            .and_then(|g| {
-                g.as_ref()
-                    .map(|(at, captured_at, frame)| (*at, *captured_at, frame.clone()))
+        let Ok(guard) = self.latest.lock() else {
+            return VideoFrameStatus::Missing;
+        };
+        let Some((at, captured_at, frame)) = guard.as_ref() else {
+            return VideoFrameStatus::Missing;
+        };
+        if at.elapsed() < FRAME_FRESHNESS {
+            VideoFrameStatus::Fresh(VideoFrameSnapshot {
+                frame: frame.clone(),
+                captured_at: *captured_at,
             })
-            .map(|(at, captured_at, frame)| {
-                let age = at.elapsed();
-                if age < FRAME_FRESHNESS {
-                    VideoFrameStatus::Fresh(VideoFrameSnapshot {
-                        frame,
-                        captured_at,
-                        age,
-                    })
-                } else {
-                    VideoFrameStatus::Stale { captured_at, age }
-                }
-            })
-            .unwrap_or(VideoFrameStatus::Missing)
+        } else {
+            VideoFrameStatus::Stale
+        }
     }
 
     /// Replace the stored frame (called by the video pump).
