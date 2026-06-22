@@ -46,7 +46,7 @@
 //! # Ok(()) }
 //! ```
 
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result};
 use std::sync::{Arc, Mutex};
@@ -103,7 +103,7 @@ pub struct AvParticipant {
 /// (audio-only). Cheap to clone.
 #[derive(Clone, Default)]
 pub struct VideoHandle {
-    latest: Arc<Mutex<Option<(Instant, VideoFrame)>>>,
+    latest: Arc<Mutex<Option<(Instant, SystemTime, VideoFrame)>>>,
 }
 
 /// How long a stored frame stays servable. Without this, a participant
@@ -113,21 +113,57 @@ pub struct VideoHandle {
 /// static screenshares, short enough that a dead feed reads as dead.
 const FRAME_FRESHNESS: Duration = Duration::from_secs(10);
 
+/// Snapshot of a participant's most recent decoded video frame.
+#[derive(Clone)]
+pub struct VideoFrameSnapshot {
+    pub frame: VideoFrame,
+    pub captured_at: SystemTime,
+}
+
+/// Status of a participant's latest decoded video frame.
+#[derive(Clone)]
+pub enum VideoFrameStatus {
+    Fresh(VideoFrameSnapshot),
+    Stale,
+    Missing,
+}
+
 impl VideoHandle {
     /// The most recent frame, cloned out — frame pixel data is
     /// reference-counted, so the clone is shallow. Returns `None` when
     /// no frame has arrived within [`FRAME_FRESHNESS`].
     pub fn latest(&self) -> Option<VideoFrame> {
-        self.latest.lock().ok().and_then(|g| {
-            g.as_ref()
-                .and_then(|(at, frame)| (at.elapsed() < FRAME_FRESHNESS).then(|| frame.clone()))
-        })
+        match self.latest_status() {
+            VideoFrameStatus::Fresh(snapshot) => Some(snapshot.frame),
+            VideoFrameStatus::Stale | VideoFrameStatus::Missing => None,
+        }
+    }
+
+    /// The current frame status, including stale frames that
+    /// [`latest`](Self::latest) intentionally hides from callers.
+    /// The frame is cloned only on the fresh path — status-only
+    /// callers (freshness checks) never touch the pixel data.
+    pub fn latest_status(&self) -> VideoFrameStatus {
+        let Ok(guard) = self.latest.lock() else {
+            return VideoFrameStatus::Missing;
+        };
+        let Some((at, captured_at, frame)) = guard.as_ref() else {
+            return VideoFrameStatus::Missing;
+        };
+        if at.elapsed() < FRAME_FRESHNESS {
+            VideoFrameStatus::Fresh(VideoFrameSnapshot {
+                frame: frame.clone(),
+                captured_at: *captured_at,
+            })
+        } else {
+            VideoFrameStatus::Stale
+        }
     }
 
     /// Replace the stored frame (called by the video pump).
     fn set(&self, frame: VideoFrame) {
         if let Ok(mut g) = self.latest.lock() {
-            *g = Some((Instant::now(), frame));
+            *g = Some((Instant::now(), SystemTime::now(), frame));
         }
     }
 

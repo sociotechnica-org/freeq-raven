@@ -28,7 +28,7 @@ use freeq_sdk::event::Event;
 use tokio::sync::mpsc::Receiver;
 
 mod common;
-use common::{claude_agent_without_api_key_config, mint_identity};
+use common::{claude_agent_without_api_key_config, mint_identity, shell_quote};
 
 // ───────────────────────────── server bootstrap ─────────────────────────────
 
@@ -867,5 +867,118 @@ async fn scenario_9_claude_agent_without_api_key_fails_loudly() {
     assert!(
         reply.contains("claude agent sidecar failed"),
         "Raven did not identify the sidecar failure: {reply}",
+    );
+}
+
+#[tokio::test]
+async fn scenario_10_claude_agent_receives_looking_at_chat_without_frame() {
+    let server = spawn_server("claude-agent-looking-at-srv");
+    let addr = server.addr_str();
+    let sidecar_tmp = tempfile::tempdir().expect("sidecar tempdir");
+    let sidecar_path = sidecar_tmp.path().join("fake-sidecar.mjs");
+    let request_path = sidecar_tmp.path().join("request.json");
+    let request_path_json =
+        serde_json::to_string(&request_path.display().to_string()).expect("quote path");
+    std::fs::write(
+        &sidecar_path,
+        format!(
+            r#"
+import fs from "node:fs";
+const input = fs.readFileSync(0, "utf8").trim();
+const req = JSON.parse(input);
+fs.writeFileSync({request_path_json}, JSON.stringify(req, null, 2));
+process.stdout.write(JSON.stringify({{
+  id: req.id,
+  type: "response",
+  ok: true,
+  text: "fake sidecar received the looking-at turn",
+  sessionId: "fake-session",
+  plugins: [],
+  skills: []
+}}) + "\n");
+"#
+        ),
+    )
+    .expect("write fake sidecar");
+
+    let fake_sidecar = ClaudeAgentConfig {
+        command: format!("node {}", shell_quote(&sidecar_path.display().to_string())),
+        workdir: None,
+        alexandria_plugin_path: None,
+        model: None,
+        permission_mode: "dontAsk".to_string(),
+        max_turns: 2,
+        timeout: Duration::from_secs(10),
+    };
+
+    let mut witness = Witness::join(&addr, "alice", "#avtest").await;
+    let (_bot, _tmp) = spawn_bot_with_claude_agent(
+        &addr,
+        vec!["#avtest".to_string()],
+        "ravenbot",
+        Some(fake_sidecar),
+    );
+
+    assert!(
+        witness
+            .wait_for(SETTLE, |ev| match ev {
+                Event::Joined { nick, channel, .. }
+                    if nick.eq_ignore_ascii_case("ravenbot")
+                        && channel.eq_ignore_ascii_case("#avtest") =>
+                {
+                    Some(())
+                }
+                _ => None,
+            })
+            .await
+            .is_some(),
+        "bot never joined #avtest",
+    );
+    tokio::time::sleep(Duration::from_secs(16)).await;
+
+    witness
+        .handle
+        .privmsg(
+            "#avtest",
+            "ravenbot, I've got a codex agent looking at the problem",
+        )
+        .await
+        .expect("send looking-at chat turn");
+
+    let reply = witness
+        .wait_for(SETTLE, |ev| match ev {
+            Event::Message {
+                from, target, text, ..
+            } if from.eq_ignore_ascii_case("ravenbot")
+                && target.eq_ignore_ascii_case("#avtest") =>
+            {
+                Some(text.clone())
+            }
+            _ => None,
+        })
+        .await
+        .expect("Raven never replied through the fake sidecar");
+
+    assert_eq!(reply, "fake sidecar received the looking-at turn");
+    assert!(
+        !reply.contains("I can't see anything right now"),
+        "Raven used the canned vision fallback instead of the sidecar"
+    );
+    let request: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&request_path).expect("read request"))
+            .expect("parse recorded sidecar request");
+    assert_eq!(
+        request["question"],
+        "I've got a codex agent looking at the problem"
+    );
+    assert_eq!(request["channel"], "#avtest");
+    assert_eq!(request["asker"], "alice");
+    assert!(
+        request.get("visionBridge").is_some(),
+        "sidecar request did not include vision bridge metadata"
+    );
+    assert!(
+        request["visionBridge"].get("dataUri").is_none(),
+        "sidecar request eagerly attached image data"
     );
 }

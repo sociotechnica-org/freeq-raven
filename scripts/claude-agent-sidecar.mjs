@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import fs from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const DEFAULT_ALLOWED_TOOLS = [
   "Read",
@@ -17,6 +17,8 @@ const DEFAULT_ALLOWED_TOOLS = [
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, "..");
+const VISION_MCP_SERVER_NAME = "raven_vision";
+const VISION_TOOL_NAME = "raven_latest_frame";
 
 function readStdin() {
   return fs.readFileSync(0, "utf8");
@@ -68,6 +70,22 @@ function buildPrompt(req) {
     "Recent normalized room context:",
     context,
   ];
+  if (req.visionBridge) {
+    const participants = Array.isArray(req.visionBridge.participants)
+      ? req.visionBridge.participants
+      : [];
+    const summary = participants.length
+      ? participants
+          .map((participant) => {
+            const name = participant?.name || "unknown";
+            if (participant?.frameAvailable) return `${name} (fresh frame available)`;
+            if (participant?.frameStale) return `${name} (stale frame, do not assume visible)`;
+            return `${name} (no current frame yet)`;
+          })
+          .join(", ")
+      : "(no visible participants registered yet)";
+    lines.push("", "Vision bridge participants:", summary);
+  }
   if (req.silentAllowed) {
     lines.push(
       "",
@@ -78,6 +96,31 @@ function buildPrompt(req) {
     );
   }
   return lines.join("\n");
+}
+
+function buildSystemPromptAppend(req) {
+  const parts = [];
+  if (req.systemPrompt) parts.push(req.systemPrompt);
+  if (req.visionBridge) {
+    parts.push(
+      [
+        "Raven vision tool: you have an MCP tool named `raven_latest_frame` for inspecting the latest visible screen/camera frame in this Freeq channel.",
+        "Use it only when the user is actually asking about visual content, a screen, a camera, an image, or something currently visible.",
+        'Do not call it merely because the user uses phrases like "looking at" in a non-visual sentence.',
+        "If the tool reports `no_active_call`, `no_frame`, `unknown_participant`, or `stale_frame`, answer naturally from that fact instead of inventing visual details.",
+        "For ordinary chat, code, planning, or room-context questions, continue without using the vision tool.",
+      ].join("\n"),
+    );
+  }
+  return parts.join("\n\n");
+}
+
+function defaultAllowedTools(req) {
+  const tools = [...DEFAULT_ALLOWED_TOOLS];
+  if (req.visionBridge) {
+    tools.push(`mcp__${VISION_MCP_SERVER_NAME}__${VISION_TOOL_NAME}`);
+  }
+  return tools;
 }
 
 function discoverAlexandriaPlugin(cwd, explicitPath) {
@@ -186,28 +229,160 @@ function requireAnthropicApiKey() {
   }
 }
 
+function dataUriToImageContent(dataUri, fallbackMime) {
+  if (typeof dataUri !== "string") return null;
+  const match = dataUri.match(/^data:([^;,]+);base64,(.*)$/s);
+  if (!match) return null;
+  return {
+    type: "image",
+    data: match[2],
+    mimeType: match[1] || fallbackMime || "image/jpeg",
+  };
+}
+
+function compactVisionResult(result) {
+  if (!result || typeof result !== "object") {
+    return { ok: false, reason: "invalid_bridge_response" };
+  }
+  const { dataUri: _dataUri, ...rest } = result;
+  return rest;
+}
+
+function visionResultText(result) {
+  const compact = compactVisionResult(result);
+  if (result?.ok) {
+    const dims = Array.isArray(result.dimensions)
+      ? `${result.dimensions[0]}x${result.dimensions[1]}`
+      : "unknown dimensions";
+    return [
+      `Latest visible frame for ${result.participant || "the participant"} is available.`,
+      `Metadata: ${JSON.stringify({ ...compact, dimensionsText: dims })}`,
+    ].join("\n");
+  }
+  return `No visible frame is available. Bridge result: ${JSON.stringify(compact)}`;
+}
+
+export function visionBridgeResultToToolResult(result) {
+  const content = [{ type: "text", text: visionResultText(result) }];
+  if (result?.ok) {
+    const image = dataUriToImageContent(result.dataUri, result.mime);
+    if (image) content.push(image);
+  }
+  return {
+    content,
+    structuredContent: compactVisionResult(result),
+  };
+}
+
+export async function fetchVisionBridgeFrame(visionBridge, args = {}) {
+  if (!visionBridge?.endpoint || !visionBridge?.bearerToken) {
+    return { ok: false, reason: "vision_bridge_unavailable" };
+  }
+  const endpoint = String(visionBridge.endpoint).replace(/\/+$/, "");
+  const body = {
+    channel: visionBridge.channel,
+    asker: visionBridge.asker,
+  };
+  if (typeof args.participant === "string" && args.participant.trim()) {
+    body.participant = args.participant.trim();
+  }
+  if (typeof args.question === "string" && args.question.trim()) {
+    body.question = args.question.trim();
+  }
+  const response = await fetch(`${endpoint}/latest-frame`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${visionBridge.bearerToken}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+  const responseText = await response.text();
+  const parsed = (() => {
+    try {
+      return JSON.parse(responseText);
+    } catch {
+      return {
+        ok: false,
+        reason: "invalid_bridge_response",
+        status: response.status,
+        text: responseText,
+      };
+    }
+  })();
+  if (parsed && typeof parsed.ok === "boolean") return parsed;
+  return {
+    ok: false,
+    reason: "invalid_bridge_response",
+    status: response.status,
+    response: parsed,
+  };
+}
+
+export async function ravenLatestFrameToolResult(visionBridge, args = {}) {
+  const result = await fetchVisionBridgeFrame(visionBridge, args);
+  return visionBridgeResultToToolResult(result);
+}
+
+function createVisionMcpServer(req, sdk) {
+  if (!req.visionBridge) return null;
+  const { createSdkMcpServer, tool, z } = sdk;
+  if (!createSdkMcpServer || !tool || !z) return null;
+  return createSdkMcpServer({
+    name: VISION_MCP_SERVER_NAME,
+    version: "0.1.0",
+    alwaysLoad: true,
+    instructions:
+      "Provides Raven with the current Freeq screen/camera frame on demand. Use only for genuinely visual user requests.",
+    tools: [
+      tool(
+        VISION_TOOL_NAME,
+        "Inspect the latest visible screen/camera frame for the current Freeq channel. Defaults to the current asker.",
+        {
+          participant: z
+            .string()
+            .optional()
+            .describe("Optional participant name. Defaults to the current asker."),
+          question: z
+            .string()
+            .optional()
+            .describe("Optional visual question or focus for the inspection."),
+        },
+        async (args) => ravenLatestFrameToolResult(req.visionBridge, args),
+        { alwaysLoad: true },
+      ),
+    ],
+  });
+}
+
 async function handleReal(req) {
   requireAnthropicApiKey();
-  const { query } = await import("@anthropic-ai/claude-agent-sdk");
+  const sdk = await import("@anthropic-ai/claude-agent-sdk");
+  const { query } = sdk;
   const cwd = path.resolve(req.cwd || process.cwd());
   const pluginPath = discoverAlexandriaPlugin(cwd, req.alexandriaPluginPath);
   const plugins = [];
   if (pluginPath) {
     plugins.push({ type: "local", path: pluginPath });
   }
+  const visionMcpServer = createVisionMcpServer(req, sdk);
+  const mcpServers = visionMcpServer
+    ? { [VISION_MCP_SERVER_NAME]: visionMcpServer }
+    : undefined;
 
   const options = {
     cwd,
     maxTurns: req.maxTurns ?? 24,
     model: req.model || process.env.RAVEN_AGENT_MODEL || undefined,
-    allowedTools: req.allowedTools || DEFAULT_ALLOWED_TOOLS,
+    allowedTools: req.allowedTools || defaultAllowedTools(req),
     permissionMode: req.permissionMode || process.env.RAVEN_AGENT_PERMISSION_MODE || "dontAsk",
+    mcpServers,
     plugins,
     skills: "all",
     systemPrompt: {
       type: "preset",
       preset: "claude_code",
-      append: req.systemPrompt || "",
+      append: buildSystemPromptAppend(req),
     },
     title: req.title || `Raven ${req.channel || "room"}`,
     env: {
@@ -232,6 +407,7 @@ async function handleReal(req) {
     model: options.model || null,
     resume: Boolean(req.sessionId),
     pluginPath: pluginPath || null,
+    visionBridge: Boolean(req.visionBridge),
   });
 
   let resultMessage = null;
@@ -341,7 +517,13 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  console.error(error?.stack || error);
-  process.exit(1);
-});
+function isMainModule() {
+  return process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
+}
+
+if (isMainModule()) {
+  main().catch((error) => {
+    console.error(error?.stack || error);
+    process.exit(1);
+  });
+}
