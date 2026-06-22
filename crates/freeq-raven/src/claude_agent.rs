@@ -27,14 +27,22 @@ pub struct ClaudeAgentTurn {
     pub session_context: String,
     pub system_prompt: String,
     pub vision_bridge: Option<ClaudeAgentVisionBridge>,
+    pub silent_allowed: bool,
 }
 
 #[derive(Debug, Clone)]
 pub struct ClaudeAgentAnswer {
     pub text: String,
+    pub action: ClaudeAgentAction,
     pub session_id: Option<String>,
     pub plugins: Vec<ClaudeAgentPlugin>,
     pub skills: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClaudeAgentAction {
+    Reply,
+    Ignore,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -85,12 +93,15 @@ struct SidecarRequest<'a> {
     max_turns: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     vision_bridge: Option<&'a ClaudeAgentVisionBridge>,
+    silent_allowed: bool,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SidecarResponse {
     ok: bool,
+    #[serde(default)]
+    action: Option<String>,
     #[serde(default)]
     text: String,
     #[serde(default)]
@@ -134,6 +145,7 @@ pub async fn ask(
         permission_mode: &cfg.permission_mode,
         max_turns: cfg.max_turns,
         vision_bridge: turn.vision_bridge.as_ref(),
+        silent_allowed: turn.silent_allowed,
     };
     let payload = serde_json::to_vec(&req).context("encoding claude agent request")?;
 
@@ -246,7 +258,11 @@ pub async fn ask(
             parsed.error.unwrap_or_else(|| "unknown error".to_string())
         );
     }
-    if parsed.text.trim().is_empty() {
+    let action = match parsed.action.as_deref() {
+        Some("ignore") => ClaudeAgentAction::Ignore,
+        _ => ClaudeAgentAction::Reply,
+    };
+    if action == ClaudeAgentAction::Reply && parsed.text.trim().is_empty() {
         anyhow::bail!("claude agent sidecar returned empty text");
     }
     if let Some(session_id) = parsed.session_id.clone() {
@@ -256,6 +272,7 @@ pub async fn ask(
 
     Ok(ClaudeAgentAnswer {
         text: parsed.text.trim().to_string(),
+        action,
         session_id: parsed.session_id,
         plugins: parsed.plugins,
         skills: parsed.skills,
@@ -311,6 +328,7 @@ mod tests {
                 session_context: String::new(),
                 system_prompt: "You are Raven.".to_string(),
                 vision_bridge: None,
+                silent_allowed: false,
             },
         )
         .await
@@ -319,6 +337,47 @@ mod tests {
             err.to_string()
                 .contains("ANTHROPIC_API_KEY is required for Claude Agent SDK sidecar"),
             "unexpected error: {err:#}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sidecar_ignore_response_allows_empty_text() -> Result<()> {
+        let cfg = ClaudeAgentConfig {
+            command:
+                "printf '%s\n' '{\"ok\":true,\"action\":\"ignore\",\"text\":\"\",\"sessionId\":\"s-1\"}'"
+                    .to_string(),
+            workdir: None,
+            alexandria_plugin_path: None,
+            model: None,
+            permission_mode: "dontAsk".to_string(),
+            max_turns: 2,
+            timeout: Duration::from_secs(10),
+        };
+        let sessions: ClaudeSessionMap =
+            std::sync::Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+        let answer = ask(
+            &cfg,
+            &sessions,
+            ClaudeAgentTurn {
+                channel: "#alexandria".to_string(),
+                asker: "alice".to_string(),
+                source: "chat".to_string(),
+                question: "candidate follow-up".to_string(),
+                session_context: String::new(),
+                system_prompt: "You are Raven.".to_string(),
+                vision_bridge: None,
+                silent_allowed: true,
+            },
+        )
+        .await?;
+
+        assert_eq!(answer.action, ClaudeAgentAction::Ignore);
+        assert_eq!(answer.text, "");
+        assert_eq!(answer.session_id.as_deref(), Some("s-1"));
+        assert_eq!(
+            sessions.lock().await.get("#alexandria").map(String::as_str),
+            Some("s-1")
         );
         Ok(())
     }

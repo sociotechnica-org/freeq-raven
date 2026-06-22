@@ -86,6 +86,15 @@ function buildPrompt(req) {
       : "(no visible participants registered yet)";
     lines.push("", "Vision bridge participants:", summary);
   }
+  if (req.silentAllowed) {
+    lines.push(
+      "",
+      "Response contract for this candidate wake follow-up:",
+      'Return exactly one JSON object and no Markdown: {"action":"ignore","text":""} when the chat is unrelated, stale, already handled, or needs no public room reply.',
+      'Return exactly one JSON object and no Markdown: {"action":"reply","text":"..."} only when Raven should say the text publicly in the room.',
+      'If you take an internal action but the room does not need an update, use {"action":"ignore","text":""}.',
+    );
+  }
   return lines.join("\n");
 }
 
@@ -97,7 +106,7 @@ function buildSystemPromptAppend(req) {
       [
         "Raven vision tool: you have an MCP tool named `raven_latest_frame` for inspecting the latest visible screen/camera frame in this Freeq channel.",
         "Use it only when the user is actually asking about visual content, a screen, a camera, an image, or something currently visible.",
-        "Do not call it merely because the user uses phrases like \"looking at\" in a non-visual sentence.",
+        'Do not call it merely because the user uses phrases like "looking at" in a non-visual sentence.',
         "If the tool reports `no_active_call`, `no_frame`, `unknown_participant`, or `stale_frame`, answer naturally from that fact instead of inventing visual details.",
         "For ordinary chat, code, planning, or room-context questions, continue without using the vision tool.",
       ].join("\n"),
@@ -141,6 +150,7 @@ function baseResponse(req, overrides) {
     id: req.id ?? null,
     type: "response",
     ok: true,
+    action: "reply",
     text: "",
     sessionId: null,
     plugins: [],
@@ -148,6 +158,30 @@ function baseResponse(req, overrides) {
     slashCommands: [],
     ...overrides,
   };
+}
+
+function parseCandidateDecision(text) {
+  const trimmed = (text || "").trim();
+  if (!trimmed) return { action: "ignore", text: "" };
+
+  const fenced = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
+  const payload = fenced ? fenced[1].trim() : trimmed;
+  try {
+    const parsed = JSON.parse(payload);
+    const action = parsed?.action === "ignore" ? "ignore" : "reply";
+    const replyText =
+      typeof parsed?.text === "string"
+        ? parsed.text.trim()
+        : typeof parsed?.reply === "string"
+          ? parsed.reply.trim()
+          : "";
+    return {
+      action: action === "ignore" || !replyText ? "ignore" : "reply",
+      text: action === "ignore" ? "" : replyText,
+    };
+  } catch {
+    return { action: "reply", text: trimmed };
+  }
 }
 
 function normalizePlugins(plugins) {
@@ -439,8 +473,14 @@ async function handleReal(req) {
     sessionId: resultMessage.session_id || initMessage?.session_id || req.sessionId || null,
   });
 
+  const rawText = resultMessage.result || assistantText;
+  const decision = req.silentAllowed
+    ? parseCandidateDecision(rawText)
+    : { action: "reply", text: rawText };
+
   return baseResponse(req, {
-    text: resultMessage.result || assistantText,
+    action: decision.action,
+    text: decision.text,
     sessionId: resultMessage.session_id || initMessage?.session_id || req.sessionId || null,
     plugins: normalizePlugins(initMessage?.plugins),
     skills: normalizeNames(initMessage?.skills),
