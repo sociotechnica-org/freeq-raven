@@ -16,10 +16,23 @@ use ed25519_dalek::SigningKey;
 use freeq_sdk::crypto::PrivateKey;
 use rand::RngCore;
 
-/// Resolved identity for the bot.
+/// Resolved identity for the bot. Stores only the seed; the SDK
+/// `PrivateKey` (which is not `Clone`) is reconstructed on demand via
+/// [`Identity::private_key_for_signing`], so a fresh signer can be minted
+/// per IRC connection (including every reconnect) without holding a
+/// long-lived key.
+#[derive(Clone)]
 pub struct Identity {
     pub did: String,
-    pub private_key: PrivateKey,
+    seed: [u8; 32],
+}
+
+impl Identity {
+    /// Reconstruct an SDK private key from the persisted seed.
+    pub fn private_key_for_signing(&self) -> PrivateKey {
+        PrivateKey::ed25519_from_bytes(&self.seed)
+            .expect("stored ed25519 seed must reconstruct a private key")
+    }
 }
 
 /// Load `~/.freeq/bots/<name>/` if present; otherwise mint a fresh
@@ -63,8 +76,6 @@ pub fn load_or_create_in(name: &str, home: &Path) -> Result<Identity> {
 
     let signing_key = SigningKey::from_bytes(&seed);
     let did = did_key_from_pubkey(signing_key.verifying_key().to_bytes());
-    let private_key =
-        PrivateKey::ed25519_from_bytes(&seed).context("constructing PrivateKey from seed")?;
 
     if !id_path.exists() {
         let doc = serde_json::json!({
@@ -76,7 +87,7 @@ pub fn load_or_create_in(name: &str, home: &Path) -> Result<Identity> {
             .with_context(|| format!("writing {}", id_path.display()))?;
     }
 
-    Ok(Identity { did, private_key })
+    Ok(Identity { did, seed })
 }
 
 /// Path layout helper, exposed for tests. Returns `<home>/.freeq/bots/<name>`.

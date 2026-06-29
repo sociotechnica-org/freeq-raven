@@ -599,15 +599,15 @@ async fn scenario_4_already_in_call() {
 // ───────────────────────────── scenario 5 ───────────────────────────────────
 
 /// Server restart: the bot connects to A, then A is killed. The bot's
-/// `run` future must *resolve* (not hang, not panic) once the socket
-/// drops — we wrap it in a timeout and assert it completed.
+/// `run` future must stay alive so it can reconnect instead of exiting
+/// successfully and leaving process supervisors with nothing to restart.
 #[tokio::test]
 async fn scenario_5_server_restart() {
     let server = spawn_server("restart-srv");
     let addr = server.addr_str();
 
     let mut witness = Witness::join(&addr, "watcher5", "#avtest").await;
-    let (bot, _tmp) = spawn_bot(&addr, vec!["#avtest".to_string()], "restartbot");
+    let (mut bot, _tmp) = spawn_bot(&addr, vec!["#avtest".to_string()], "restartbot");
 
     // Make sure the bot has fully connected + joined before we pull the
     // rug — otherwise we'd be testing the registration-timeout path.
@@ -625,16 +625,15 @@ async fn scenario_5_server_restart() {
     // Crash server A.
     server.kill();
 
-    // The bot's run() future must complete. We don't care whether it's
-    // Ok or Err — only that it didn't hang or panic.
-    let outcome = tokio::time::timeout(SETTLE, bot).await;
-    let join_result = outcome.expect("bot's run() future hung after server crash");
-    // The spawned task itself must not have panicked.
+    // The bot should keep retrying after the disconnect, not resolve.
+    let outcome = tokio::time::timeout(Duration::from_secs(5), &mut bot).await;
     assert!(
-        join_result.is_ok(),
-        "bot task panicked after server crash: {:?}",
-        join_result.err(),
+        outcome.is_err(),
+        "bot's run() future exited after server crash: {outcome:?}",
     );
+
+    bot.abort();
+    let _ = bot.await;
 }
 
 // ───────────────────────────── scenario 6 ───────────────────────────────────
