@@ -20,6 +20,27 @@ use rand::RngCore;
 pub struct Identity {
     pub did: String,
     pub private_key: PrivateKey,
+    seed: [u8; 32],
+}
+
+impl Clone for Identity {
+    fn clone(&self) -> Self {
+        Self {
+            did: self.did.clone(),
+            private_key: self.private_key_for_signing(),
+            seed: self.seed,
+        }
+    }
+}
+
+impl Identity {
+    /// Reconstruct an SDK private key from the persisted seed. The SDK
+    /// key type is intentionally not `Clone`, but reconnects need a
+    /// fresh signer per IRC connection.
+    pub fn private_key_for_signing(&self) -> PrivateKey {
+        PrivateKey::ed25519_from_bytes(&self.seed)
+            .expect("stored ed25519 seed must reconstruct a private key")
+    }
 }
 
 /// Load `~/.freeq/bots/<name>/` if present; otherwise mint a fresh
@@ -76,7 +97,11 @@ pub fn load_or_create_in(name: &str, home: &Path) -> Result<Identity> {
             .with_context(|| format!("writing {}", id_path.display()))?;
     }
 
-    Ok(Identity { did, private_key })
+    Ok(Identity {
+        did,
+        private_key,
+        seed,
+    })
 }
 
 /// Path layout helper, exposed for tests. Returns `<home>/.freeq/bots/<name>`.

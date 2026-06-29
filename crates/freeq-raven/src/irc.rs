@@ -487,6 +487,7 @@ use crate::video::VideoTile;
 use crate::whiteboard::Step;
 use crate::{claude_agent, imagegen, qa, summary, tts, vision, vision_bridge};
 
+#[derive(Clone)]
 pub struct RunConfig {
     pub server: String,
     pub channels: Vec<String>,
@@ -571,6 +572,7 @@ pub struct RunConfig {
     pub peer_agents: Vec<String>,
 }
 
+#[derive(Clone)]
 pub enum AuthIdentity {
     DidKey(Identity),
     Signer {
@@ -586,20 +588,21 @@ impl AuthIdentity {
         }
     }
 
-    fn into_signer(self) -> Arc<dyn ChallengeSigner> {
+    fn signer(&self) -> Arc<dyn ChallengeSigner> {
         match self {
-            Self::DidKey(Identity { did, private_key }) => {
-                Arc::new(KeySigner::new(did, private_key))
-            }
-            Self::Signer { signer, .. } => signer,
+            Self::DidKey(ident) => Arc::new(KeySigner::new(
+                ident.did.clone(),
+                ident.private_key_for_signing(),
+            )),
+            Self::Signer { signer, .. } => signer.clone(),
         }
     }
 }
 
 /// Subset of [`RunConfig`] shared with inner tasks. Excludes the
-/// PrivateKey (already moved into the signer) so it's `Clone`-friendly
-/// inside an `Arc`. `pub(crate)` so the [`proactive`](crate::proactive)
-/// monitor can read the same config.
+/// connection-only auth identity so it's `Clone`-friendly inside an
+/// `Arc`. `pub(crate)` so the [`proactive`](crate::proactive) monitor
+/// can read the same config.
 pub(crate) struct SharedConfig {
     pub(crate) server: String,
     pub(crate) channels: Vec<String>,
@@ -750,9 +753,79 @@ impl Drop for ActiveCall {
 }
 
 pub async fn run(cfg: RunConfig) -> Result<()> {
+    let mut reconnect_backoff = RECONNECT_INITIAL_BACKOFF;
+
+    loop {
+        let attempt_started = Instant::now();
+        match run_once(cfg.clone()).await {
+            Ok(()) => {
+                let delay = reconnect_delay(reconnect_backoff, attempt_started.elapsed());
+                tracing::warn!(
+                    delay_ms = delay.as_millis(),
+                    "Freeq connection ended; reconnecting"
+                );
+                tokio::time::sleep(delay).await;
+                reconnect_backoff =
+                    next_reconnect_backoff(reconnect_backoff, attempt_started.elapsed());
+            }
+            Err(error) if is_retryable_connection_error(&error) => {
+                tracing::warn!(
+                    error = ?error,
+                    delay_ms = reconnect_backoff.as_millis(),
+                    "Freeq connection attempt failed; reconnecting"
+                );
+                tokio::time::sleep(reconnect_backoff).await;
+                reconnect_backoff =
+                    next_reconnect_backoff(reconnect_backoff, attempt_started.elapsed());
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+const RECONNECT_INITIAL_BACKOFF: Duration = Duration::from_secs(1);
+const RECONNECT_MAX_BACKOFF: Duration = Duration::from_secs(60);
+const RECONNECT_STABLE_AFTER: Duration = Duration::from_secs(60);
+
+fn reconnect_delay(current: Duration, attempt_elapsed: Duration) -> Duration {
+    if attempt_elapsed >= RECONNECT_STABLE_AFTER {
+        RECONNECT_INITIAL_BACKOFF
+    } else {
+        current
+    }
+}
+
+fn next_reconnect_backoff(current: Duration, attempt_elapsed: Duration) -> Duration {
+    if attempt_elapsed >= RECONNECT_STABLE_AFTER {
+        return RECONNECT_INITIAL_BACKOFF;
+    }
+    let next = current.saturating_mul(2);
+    if next > RECONNECT_MAX_BACKOFF {
+        RECONNECT_MAX_BACKOFF
+    } else {
+        next
+    }
+}
+
+fn is_retryable_connection_error(error: &anyhow::Error) -> bool {
+    let message = error.to_string();
+    message == "connection closed during registration" || message == "registration timeout"
+}
+
+struct AbortTaskOnDrop(Option<JoinHandle<()>>);
+
+impl Drop for AbortTaskOnDrop {
+    fn drop(&mut self) {
+        if let Some(task) = &self.0 {
+            task.abort();
+        }
+    }
+}
+
+async fn run_once(cfg: RunConfig) -> Result<()> {
     // Destructure up front so we own the individual fields; the cfg
     // we hand to the inner tasks (wrapped in Arc) is rebuilt below
-    // without the moved-out auth signer.
+    // without the connection-only auth identity.
     let RunConfig {
         server,
         channels,
@@ -821,7 +894,7 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
     };
 
     tracing::info!(did = %auth.did(), "freeq auth identity ready");
-    let signer = auth.into_signer();
+    let signer = auth.signer();
     let (handle, mut events) = client::connect(conn_config, Some(signer));
 
     // Wait for registration.
@@ -868,8 +941,8 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
             }
         });
 
-    // Reassemble a sharable config without the (already-moved) private
-    // key for the inner tasks.
+    // Reassemble a sharable config without the connection-only auth
+    // identity for the inner tasks.
     let vision_bridge = if claude_agent.is_some() {
         Some(
             vision_bridge::VisionBridgeHandle::start()
@@ -932,7 +1005,7 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
         started_at: Instant::now(),
     });
     let handle_arc = Arc::new(handle);
-    let _wake_task = spawn_alexandria_wake_relay(cfg.clone(), handle_arc.clone());
+    let _wake_task = AbortTaskOnDrop(spawn_alexandria_wake_relay(cfg.clone(), handle_arc.clone()));
 
     // Discover-or-start. If `--start-session-in` is set we want a call
     // running — but a blind `av-start` is rejected by the server when
