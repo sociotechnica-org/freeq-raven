@@ -47,7 +47,10 @@ fn second_call_is_idempotent() {
     let b = identity::load_or_create_in("idem", tmp.path()).unwrap();
     assert_eq!(a.did, b.did, "DID must be stable across calls");
     // Private key bytes should also match.
-    assert_eq!(a.private_key.secret_bytes(), b.private_key.secret_bytes());
+    assert_eq!(
+        a.private_key_for_signing().secret_bytes(),
+        b.private_key_for_signing().secret_bytes()
+    );
 }
 
 /// A pre-existing 32-byte seed deterministically produces the same DID

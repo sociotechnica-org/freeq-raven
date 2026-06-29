@@ -752,73 +752,62 @@ impl Drop for ActiveCall {
     }
 }
 
-pub async fn run(cfg: RunConfig) -> Result<()> {
-    let mut reconnect_backoff = RECONNECT_INITIAL_BACKOFF;
-
-    loop {
-        let attempt_started = Instant::now();
-        match run_once(cfg.clone()).await {
-            Ok(()) => {
-                let delay = reconnect_delay(reconnect_backoff, attempt_started.elapsed());
-                tracing::warn!(
-                    delay_ms = delay.as_millis(),
-                    "Freeq connection ended; reconnecting"
-                );
-                tokio::time::sleep(delay).await;
-                reconnect_backoff =
-                    next_reconnect_backoff(reconnect_backoff, attempt_started.elapsed());
-            }
-            Err(error) if is_retryable_connection_error(&error) => {
-                tracing::warn!(
-                    error = ?error,
-                    delay_ms = reconnect_backoff.as_millis(),
-                    "Freeq connection attempt failed; reconnecting"
-                );
-                tokio::time::sleep(reconnect_backoff).await;
-                reconnect_backoff =
-                    next_reconnect_backoff(reconnect_backoff, attempt_started.elapsed());
-            }
-            Err(error) => return Err(error),
-        }
-    }
-}
-
 const RECONNECT_INITIAL_BACKOFF: Duration = Duration::from_secs(1);
 const RECONNECT_MAX_BACKOFF: Duration = Duration::from_secs(60);
 const RECONNECT_STABLE_AFTER: Duration = Duration::from_secs(60);
 
-fn reconnect_delay(current: Duration, attempt_elapsed: Duration) -> Duration {
-    if attempt_elapsed >= RECONNECT_STABLE_AFTER {
-        RECONNECT_INITIAL_BACKOFF
-    } else {
-        current
-    }
-}
+/// Registration failures the reconnect loop treats as retryable. Defined
+/// once so the producers in [`wait_for_registration_with_timeout`] and the
+/// [`is_retryable_connection_error`] matcher can't silently drift apart.
+const ERR_CONNECTION_CLOSED_DURING_REGISTRATION: &str = "connection closed during registration";
+const ERR_REGISTRATION_TIMEOUT: &str = "registration timeout";
 
-fn next_reconnect_backoff(current: Duration, attempt_elapsed: Duration) -> Duration {
-    if attempt_elapsed >= RECONNECT_STABLE_AFTER {
-        return RECONNECT_INITIAL_BACKOFF;
-    }
-    let next = current.saturating_mul(2);
-    if next > RECONNECT_MAX_BACKOFF {
-        RECONNECT_MAX_BACKOFF
-    } else {
-        next
+pub async fn run(cfg: RunConfig) -> Result<()> {
+    let mut backoff = RECONNECT_INITIAL_BACKOFF;
+
+    loop {
+        let attempt_started = Instant::now();
+        let result = run_once(cfg.clone()).await;
+        if let Err(error) = &result {
+            if !is_retryable_connection_error(error) {
+                return result;
+            }
+        }
+        // A connection that stayed up past the stability window resets the
+        // schedule to the initial delay; an attempt that failed fast keeps
+        // doubling the backoff up to the cap (recomputed after the sleep).
+        let stable = attempt_started.elapsed() >= RECONNECT_STABLE_AFTER;
+        if stable {
+            backoff = RECONNECT_INITIAL_BACKOFF;
+        }
+        match &result {
+            Ok(()) => tracing::warn!(
+                delay_ms = backoff.as_millis(),
+                "Freeq connection ended; reconnecting"
+            ),
+            Err(error) => tracing::warn!(
+                error = ?error,
+                delay_ms = backoff.as_millis(),
+                "Freeq connection attempt failed; reconnecting"
+            ),
+        }
+        tokio::time::sleep(backoff).await;
+        if !stable {
+            backoff = backoff.saturating_mul(2).min(RECONNECT_MAX_BACKOFF);
+        }
     }
 }
 
 fn is_retryable_connection_error(error: &anyhow::Error) -> bool {
     let message = error.to_string();
-    message == "connection closed during registration" || message == "registration timeout"
+    message == ERR_CONNECTION_CLOSED_DURING_REGISTRATION || message == ERR_REGISTRATION_TIMEOUT
 }
 
-struct AbortTaskOnDrop(Option<JoinHandle<()>>);
+struct AbortTaskOnDrop(JoinHandle<()>);
 
 impl Drop for AbortTaskOnDrop {
     fn drop(&mut self) {
-        if let Some(task) = &self.0 {
-            task.abort();
-        }
+        self.0.abort();
     }
 }
 
@@ -1005,7 +994,8 @@ async fn run_once(cfg: RunConfig) -> Result<()> {
         started_at: Instant::now(),
     });
     let handle_arc = Arc::new(handle);
-    let _wake_task = AbortTaskOnDrop(spawn_alexandria_wake_relay(cfg.clone(), handle_arc.clone()));
+    let _wake_task =
+        spawn_alexandria_wake_relay(cfg.clone(), handle_arc.clone()).map(AbortTaskOnDrop);
 
     // Discover-or-start. If `--start-session-in` is set we want a call
     // running — but a blind `av-start` is rejected by the server when
@@ -2474,8 +2464,8 @@ pub(crate) async fn wait_for_registration_with_timeout(
             Ok(Some(Event::Registered { nick })) => return Ok(nick),
             Ok(Some(Event::AuthFailed { reason })) => anyhow::bail!("SASL auth failed: {reason}"),
             Ok(Some(_)) => continue,
-            Ok(None) => anyhow::bail!("connection closed during registration"),
-            Err(_) => anyhow::bail!("registration timeout"),
+            Ok(None) => anyhow::bail!(ERR_CONNECTION_CLOSED_DURING_REGISTRATION),
+            Err(_) => anyhow::bail!(ERR_REGISTRATION_TIMEOUT),
         }
     }
 }
